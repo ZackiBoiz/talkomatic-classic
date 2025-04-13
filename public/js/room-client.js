@@ -22,7 +22,7 @@ let soundEnabled = true;
 const muteToggleButton = document.getElementById('muteToggle');
 const muteIcon = document.getElementById('muteIcon');
 
-const MAX_MESSAGE_LENGTH = 5000;
+const MAX_MESSAGE_LENGTH = 10000000;
 
 // Emote system variables
 let emoteList = {};

@@ -34,18 +34,18 @@ const CONFIG = {
     MAX_USERNAME_LENGTH: 12,
     MAX_LOCATION_LENGTH: 12,
     MAX_ROOM_NAME_LENGTH: 20,
-    MAX_MESSAGE_LENGTH: 5000,
+    MAX_MESSAGE_LENGTH: 10000000,
     MAX_ROOM_CAPACITY: 5,
     // WebSocket flood protection config
     MAX_CONNECTIONS_PER_IP: 15,
     SOCKET_MAX_REQUESTS_WINDOW: 1, // 1 second
     SOCKET_MAX_REQUESTS_PER_WINDOW: 50, // 50 requests per second
-    CHAT_UPDATE_RATE_LIMIT: 20, // Max 20 updates per second
+    CHAT_UPDATE_RATE_LIMIT: 50, // Max 20 updates per second
     TYPING_RATE_LIMIT: 10, // Max 10 typing events per second
     CONNECTION_DELAY: 1000 // 1000ms delay between connection attempts
   },
   FEATURES: {
-    ENABLE_WORD_FILTER: true
+    ENABLE_WORD_FILTER: false
   },
   TIMING: {
     ROOM_CREATION_COOLDOWN: 30000, // 30 seconds cooldown
@@ -142,6 +142,7 @@ const corsOptions = {
 };
 
 // Parse JSON bodies for the REST API
+app.set("trust proxy", 2);
 app.use(express.json());
 app.use(cors(corsOptions));
 app.use(cookieParser());
