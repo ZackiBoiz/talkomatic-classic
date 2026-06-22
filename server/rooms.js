@@ -105,14 +105,22 @@ function getUserRoomsCount(userId) {
   return 0;
 }
 
-function getUsernameLocationRoomsCount(username, location) {
+// Counts whether this username/location is ALREADY occupying a room, used to
+// enforce one identity per room. Ignores:
+//   • the caller's own userId (so re-joining across the lobby→room navigation,
+//     where a brief duplicate entry exists, never blocks them), and
+//   • ghosts — matching entries whose socket is already gone (a stale session
+//     the server hasn't cleaned yet). Without this, a disconnected ghost with
+//     the same name would block the real user even after clearing cookies.
+function getUsernameLocationRoomsCount(username, location, excludeUserId) {
   const uLow = normalize(username);
   const lLow = normalize(location);
   for (const [, room] of state.rooms) {
-    if (room.users) {
-      for (const u of room.users) {
-        if (normalize(u.username) === uLow && normalize(u.location) === lLow)
-          return 1;
+    if (!room.users) continue;
+    for (const u of room.users) {
+      if (excludeUserId && u.id === excludeUserId) continue;
+      if (normalize(u.username) === uLow && normalize(u.location) === lLow) {
+        if (findSocketByUserId(u.id)) return 1; // only a LIVE duplicate blocks
       }
     }
   }
@@ -1179,7 +1187,7 @@ function joinRoom(socket, roomId, userId) {
         );
       }
       if (
-        getUsernameLocationRoomsCount(username, location) >=
+        getUsernameLocationRoomsCount(username, location, userId) >=
         CONFIG.LIMITS.MAX_ROOMS_PER_USER
       ) {
         return socket.emit(
@@ -1794,7 +1802,7 @@ function registerSocketHandlers() {
         }
 
         if (
-          getUsernameLocationRoomsCount(username, location) >=
+          getUsernameLocationRoomsCount(username, location, userId) >=
           CONFIG.LIMITS.MAX_ROOMS_PER_USER
         )
           return socket.emit(
