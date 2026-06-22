@@ -288,11 +288,13 @@ function getUserStaffRole(userId) {
   return null;
 }
 
-// Hierarchy: devs act on anyone; mods cannot act on mods or devs.
+// Hierarchy: devs can act on normal users and mods, but NOT on other devs.
+// Mods can only act on normal (non-staff) users. Nobody can act on a dev.
 function canActOn(actorSocket, targetUserId) {
-  if (actorSocket?.isDev) return true;
-  if (!actorSocket?.isMod) return false;
-  return getUserStaffRole(targetUserId) === null;
+  const targetRole = getUserStaffRole(targetUserId);
+  if (actorSocket?.isDev) return targetRole !== "dev";
+  if (actorSocket?.isMod) return targetRole === null;
+  return false;
 }
 
 // Gate helpers: emit a uniform error and return false when not permitted.
@@ -347,6 +349,24 @@ function logStaff(socket, action, target, room, details) {
 const staffKeyAttempts = new Map(); // ip -> { count, resetAt }
 const STAFF_KEY_MAX_ATTEMPTS = 15;
 const STAFF_KEY_WINDOW = 5 * 60 * 1000;
+
+// Snapshot of currently-blocked IPs for the dev panel (skips expired entries).
+function buildBlockList() {
+  const now = Date.now();
+  const out = [];
+  for (const [ip, b] of state.blockedIPs) {
+    const expiry = b && typeof b === "object" ? b.expiry : b;
+    if (expiry && expiry !== Number.MAX_SAFE_INTEGER && now >= expiry) continue;
+    out.push({
+      ip,
+      label: (b && b.label) || null,
+      by: (b && b.by) || null,
+      permanent: expiry >= Number.MAX_SAFE_INTEGER,
+      expiry: expiry || 0,
+    });
+  }
+  return out;
+}
 
 // ── Room Utilities ──────────────────────────────────────────────────────────
 
@@ -2224,6 +2244,16 @@ function registerSocketHandlers() {
           );
         }
 
+        if (!canActOn(socket, data.targetUserId)) {
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.FORBIDDEN,
+              "You cannot act on this user.",
+            ),
+          );
+        }
+
         const targetUserId = data.targetUserId;
         let targetRoomId = null;
         let targetRoom = null;
@@ -2484,11 +2514,19 @@ function registerSocketHandlers() {
           );
         const expiry =
           ms === Infinity ? Number.MAX_SAFE_INTEGER : Date.now() + ms;
-        state.blockedIPs.set(ip, { expiry });
-
         const roomId = getUserCurrentRoom(targetUserId);
         const room = roomId ? state.rooms.get(roomId) : null;
         const targetUser = room?.users.find((u) => u.id === targetUserId);
+        const blockedName =
+          targetUser?.username ||
+          targetSocket?.handshake?.session?.username ||
+          null;
+        state.blockedIPs.set(ip, {
+          expiry,
+          label: blockedName,
+          by: socket.staffLabel || null,
+          ts: Date.now(),
+        });
 
         for (const s of findSocketsByIp(ip)) {
           try {
@@ -2942,6 +2980,14 @@ function registerSocketHandlers() {
               "targetUserId required.",
             ),
           );
+        if (!canActOn(socket, targetUserId))
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.FORBIDDEN,
+              "You cannot act on this user.",
+            ),
+          );
         const targets = findSocketsByUserId(targetUserId);
         if (targets.length === 0)
           return socket.emit(
@@ -3200,6 +3246,14 @@ function registerSocketHandlers() {
     );
 
     socket.on(
+      "dev list blocks",
+      safe(async () => {
+        if (!requireDev(socket)) return;
+        socket.emit("dev blocks", buildBlockList());
+      }),
+    );
+
+    socket.on(
       "dev unblock ip",
       safe(async (data) => {
         if (!requireDev(socket)) return;
@@ -3218,6 +3272,8 @@ function registerSocketHandlers() {
           ip,
           removed,
         });
+        // Refresh the dev panel's live block list
+        socket.emit("dev blocks", buildBlockList());
       }),
     );
 

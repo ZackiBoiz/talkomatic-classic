@@ -1113,6 +1113,8 @@ window.addEventListener("beforeunload", () => {
 // ════════════════════════════════════════════════════════════════════════════
 
 let manageKeysOpen = false;
+let blocksOpen = false;
+let blocksCtrl = null;
 
 function lobbyNotify(message, type, opts) {
   if (window.StaffUI)
@@ -1258,16 +1260,11 @@ function openDevPanel() {
           },
           {
             icon: "🔓",
-            label: "Unblock an IP…",
-            desc: "Remove a specific IP block",
-            onClick: async () => {
-              const ip = await StaffUI.prompt({
-                title: "Unblock IP",
-                fields: [
-                  { name: "value", label: "IP address", required: true },
-                ],
-              });
-              if (ip) socket.emit("dev unblock ip", { ip });
+            label: "Blocked IPs…",
+            desc: "See who is blocked and unblock them",
+            onClick: () => {
+              blocksOpen = true;
+              socket.emit("dev list blocks");
             },
           },
           {
@@ -1409,6 +1406,49 @@ socket.on("dev mod keys", (keys) => {
     subtitle: `${list.length} active`,
     groups: [{ items }],
     onHelp: () => StaffUI.help("dev"),
+  });
+});
+
+socket.on("dev blocks", (list) => {
+  if (!blocksOpen || !window.StaffUI) return;
+  const blocks = Array.isArray(list) ? list : [];
+  const fmtExpiry = (b) => {
+    if (b.permanent) return "permanent";
+    if (!b.expiry) return "active";
+    const mins = Math.round((b.expiry - Date.now()) / 60000);
+    if (mins <= 0) return "expiring";
+    if (mins < 60) return mins + " min left";
+    const hrs = Math.round(mins / 60);
+    if (hrs < 48) return hrs + " hr left";
+    return Math.round(hrs / 24) + " days left";
+  };
+  const items = blocks.length
+    ? blocks.map((b) => ({
+        icon: "🚫",
+        label: (b.label ? b.label + "  " : "") + b.ip,
+        desc:
+          fmtExpiry(b) + (b.by ? "  •  blocked by " + b.by : "") + "  •  tap to unblock",
+        danger: true,
+        keepOpen: true,
+        onClick: async () => {
+          if (
+            await StaffUI.confirm({
+              title: "Unblock",
+              message:
+                "Unblock " + (b.label ? b.label + " (" + b.ip + ")" : b.ip) + "?",
+              confirmText: "Unblock",
+            })
+          )
+            socket.emit("dev unblock ip", { ip: b.ip });
+        },
+      }))
+    : [{ icon: "·", label: "No blocked IPs", desc: "Nobody is currently blocked" }];
+  if (blocksCtrl) blocksCtrl.close();
+  blocksCtrl = StaffUI.menu({
+    title: "Blocked IPs",
+    icon: "🔓",
+    subtitle: blocks.length + " active",
+    groups: [{ items }],
   });
 });
 
