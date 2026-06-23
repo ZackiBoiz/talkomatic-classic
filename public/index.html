@@ -539,6 +539,14 @@
       .fa-gauge-high {
         margin-right: 10px;
       }
+
+      .fa-trophy {
+        margin-right: 10px;
+      }
+
+      .fa-user-pen {
+        margin-right: 10px;
+      }
     </style>
     <script src="https://unpkg.com/idb@8.0.3/build/umd.js"></script>
   </head>
@@ -561,12 +569,6 @@
         </div>
 
         <div class="external-links">
-          <a href="contributors.html" rel="noopener noreferrer">
-            <i class="fas fa-users"></i>Contributors
-          </a>
-          <a href="app-directory.html" rel="noopener noreferrer">
-            <i class="fas fa-th-large"></i>Apps
-          </a>
           <a
             href="documentation.html#welcome-to-talkomatic"
             target="_blank"
@@ -577,15 +579,30 @@
           <a href="https://discord.gg/N7tJznESrE" rel="noopener noreferrer">
             <i class="fab fa-discord"></i>Discord
           </a>
-
-          <a href="#" id="updateNotesButton" rel="noopener noreferrer">
-            <i class="fas fa-bullhorn"></i> Update Notes
+          <a href="#" id="leaderboardLink" rel="noopener noreferrer">
+            <i class="fas fa-trophy"></i> Leaderboard
           </a>
           <a href="themes.html" id="themesButton" rel="noopener noreferrer">
             <i class="fas fa-paintbrush"></i>Themes
           </a>
-          <a href="#" id="staffLoginLink" rel="noopener noreferrer">
+          <a
+            href="#"
+            id="updateNotesButton"
+            class="wide"
+            rel="noopener noreferrer"
+          >
+            <i class="fas fa-bullhorn"></i> Update Notes
+          </a>
+          <a
+            href="#"
+            id="staffLoginLink"
+            class="wide"
+            rel="noopener noreferrer"
+          >
             <i class="fas fa-key"></i> Staff Access
+          </a>
+          <a href="#" id="modApplyLink" class="wide" rel="noopener noreferrer">
+            <i class="fas fa-user-pen"></i> Become a moderator
           </a>
         </div>
 
@@ -960,7 +977,8 @@
     <script nonce="<%= nonce %>" src="js/lobby.js?v=2.0.1"></script>
     <script nonce="<%= nonce %>" src="/socket.io/socket.io.js?v=1.0.1"></script>
     <script nonce="<%= nonce %>" src="js/staff-ui.js?v=1.4.0"></script>
-    <script nonce="<%= nonce %>" src="js/lobby-client.js?v=2.10.0"></script>
+    <script nonce="<%= nonce %>" src="js/identity.js?v=1.0.0"></script>
+    <script nonce="<%= nonce %>" src="js/lobby-client.js?v=2.12.0"></script>
     <!-- POPUP SYSTEM: Add this script tag to enable update popups -->
     <script nonce="<%= nonce %>" src="js/popup.js?v=2.1.0"></script>
     <script nonce="<%= nonce %>" src="js/wc-2026.js?v=4.1.0"></script>

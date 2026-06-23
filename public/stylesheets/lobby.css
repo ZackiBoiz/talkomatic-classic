@@ -295,6 +295,11 @@ html {
   grid-column: 1 / -1;
 }
 
+/* Long-labelled links get their own full-width row so words do not wrap. */
+.external-links a.wide {
+  grid-column: 1 / -1;
+}
+
 /* Known-as section with a light background */
 .known-as-section {
   background-color: var(

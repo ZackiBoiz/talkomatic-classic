@@ -32,6 +32,14 @@ function hashKey(key) {
     .digest("hex");
 }
 
+// Mod keys carry a level: 1 = junior (limited), 2 = full. Keys written before
+// levels existed have no field; those are treated as full (2) so no existing
+// moderator is silently downgraded. Only an explicit 1 yields a junior key;
+// anything else resolves to full.
+function normalizeLevel(v) {
+  return Math.floor(Number(v)) === 1 ? 1 : 2;
+}
+
 // Loaded synchronously at module require time so the socket middleware can
 // validate keys on the very first connection.
 function loadModKeys() {
@@ -41,7 +49,11 @@ function loadModKeys() {
     modKeys = Array.isArray(arr)
       ? arr
           .filter((k) => k && typeof k.hash === "string")
-          .map((k) => ({ hash: k.hash, label: String(k.label || "mod") }))
+          .map((k) => ({
+            hash: k.hash,
+            label: String(k.label || "mod"),
+            level: normalizeLevel(k.level),
+          }))
       : [];
   } catch (err) {
     if (err.code !== "ENOENT")
@@ -58,7 +70,7 @@ async function saveModKeys() {
   await fsp.rename(tmp, MOD_KEYS_PATH);
 }
 
-// Dev keys live in .env as DEV_KEY_HASH — a comma-separated list of
+// Dev keys live in .env as DEV_KEY_HASH - a comma-separated list of
 // "<sha256hash>" or "<sha256hash>:Label" entries (owner-only, restart to
 // change). This supports multiple devs, each with a name for the audit log.
 let devKeys = [];
@@ -90,7 +102,7 @@ function isDevKey(key) {
   return !!getDevKey(key);
 }
 
-// Hashes + labels only — safe for an info panel.
+// Hashes + labels only - safe for an info panel.
 function listDevKeys() {
   return devKeys.map((d) => ({ hash: d.hash, label: d.label }));
 }
@@ -106,23 +118,33 @@ function validateKey(key) {
   const dk = getDevKey(key);
   if (dk) return { role: "dev", label: dk.label, hash: dk.hash };
   const mk = getModKeyByPlain(key);
-  if (mk) return { role: "mod", label: mk.label, hash: mk.hash };
+  if (mk)
+    return {
+      role: "mod",
+      label: mk.label,
+      hash: mk.hash,
+      level: normalizeLevel(mk.level),
+    };
   return { role: null, label: null, hash: null };
 }
 
 // Generates a new mod key. Only the hash is stored; the plaintext is returned
 // once for the dev to hand off and is never persisted.
-async function grantModKey(label) {
+// New grants default to a junior (level 1) key - least privilege - unless the
+// caller asks for a full (level 2) key. (Note this differs from loadModKeys,
+// where a *missing* level means an old full key.)
+async function grantModKey(label, level) {
   const key = "mk_" + crypto.randomBytes(24).toString("hex");
   const entry = {
     hash: hashKey(key),
     label: String(label || "mod")
       .trim()
       .slice(0, 40) || "mod",
+    level: normalizeLevel(level == null ? 1 : level),
   };
   modKeys.push(entry);
   await saveModKeys();
-  return { key, hash: entry.hash, label: entry.label };
+  return { key, hash: entry.hash, label: entry.label, level: entry.level };
 }
 
 async function revokeModKey(hash) {
@@ -133,9 +155,23 @@ async function revokeModKey(hash) {
   return true;
 }
 
-// Hashes only — safe to send to the dev panel.
+// Changes a mod key's level in place (dev-only promote/demote). Returns the new
+// level, or null if no key with that hash exists.
+async function setModLevel(hash, level) {
+  const mk = modKeys.find((k) => k.hash === hash);
+  if (!mk) return null;
+  mk.level = normalizeLevel(level);
+  await saveModKeys();
+  return mk.level;
+}
+
+// Hashes + levels only - safe to send to the dev panel.
 function listModKeys() {
-  return modKeys.map((k) => ({ hash: k.hash, label: k.label }));
+  return modKeys.map((k) => ({
+    hash: k.hash,
+    label: k.label,
+    level: normalizeLevel(k.level),
+  }));
 }
 
 // Appends one audit line. Best-effort; failures are logged but never throw.
@@ -229,6 +265,7 @@ module.exports = {
   validateKey,
   grantModKey,
   revokeModKey,
+  setModLevel,
   listModKeys,
   modLog,
   recordKeyUse,

@@ -31,6 +31,59 @@ const {
 } = require("./security");
 const roles = require("./roles");
 const audit = require("./audit");
+const identity = require("./identity");
+const modwatch = require("./modwatch");
+const applications = require("./applications");
+const invites = require("./invites");
+const reports = require("./reports");
+
+// Report reason categories (value to human label), shared by the report flow.
+const REPORT_CATEGORIES = {
+  spam: "Spam or flooding",
+  harassment: "Harassment or bullying",
+  hate: "Hate speech or slurs",
+  nsfw: "NSFW or inappropriate content",
+  impersonation: "Impersonation",
+  threats: "Threats or violence",
+  modabuse: "Moderator abuse",
+  other: "Other",
+};
+
+// Effective capacity for a room: a per-room override (set by a dev inside the
+// room) wins over the global default, so raising one room to 50 never changes
+// the 5-person limit in other rooms.
+function roomCapacity(room) {
+  const n = room && Number(room.maxSize);
+  return Number.isFinite(n) && n >= 2
+    ? Math.floor(n)
+    : CONFIG.LIMITS.MAX_ROOM_CAPACITY;
+}
+
+// Coarse device class from the user agent, purely for a friendly room icon.
+// Not used for anything privileged.
+function deviceTypeFromUA(ua) {
+  if (!ua || typeof ua !== "string") return "unknown";
+  const s = ua.toLowerCase();
+  if (
+    /(smart-?tv|googletv|appletv|crkey|roku|aft[bms]|netcast|web0s|webos|tizen|hbbtv|bravia|viera)/.test(
+      s,
+    )
+  )
+    return "tv";
+  if (
+    /(ipad|tablet|kindle|playbook|silk)/.test(s) ||
+    (/android/.test(s) && !/mobile/.test(s))
+  )
+    return "tablet";
+  if (
+    /(mobi|iphone|ipod|android|blackberry|bb10|iemobile|opera mini|windows phone)/.test(
+      s,
+    )
+  )
+    return "mobile";
+  if (/(windows nt|macintosh|mac os x|linux|cros|x11)/.test(s)) return "desktop";
+  return "unknown";
+}
 
 // io is accessed through state so it is available after server.js init
 function io() {
@@ -122,7 +175,7 @@ function getUserRoomsCount(userId) {
 // enforce one identity per room. Ignores:
 //   • the caller's own userId (so re-joining across the lobby→room navigation,
 //     where a brief duplicate entry exists, never blocks them), and
-//   • ghosts — matching entries whose socket is already gone (a stale session
+//   • ghosts - matching entries whose socket is already gone (a stale session
 //     the server hasn't cleaned yet). Without this, a disconnected ghost with
 //     the same name would block the real user even after clearing cookies.
 function getUsernameLocationRoomsCount(username, location, excludeUserId) {
@@ -313,6 +366,15 @@ function getUserStaffRole(userId) {
   return null;
 }
 
+// Resolve a target user's mod level from their live socket(s): 2 = full,
+// 1 = junior, 0 = not a mod.
+function getUserModLevel(userId) {
+  for (const s of findSocketsByUserId(userId)) {
+    if (s.isMod) return s.modLevel || 2;
+  }
+  return 0;
+}
+
 // Hierarchy: devs can act on normal users and mods, but NOT on other devs.
 // Mods can only act on normal (non-staff) users. Nobody can act on a dev.
 function canActOn(actorSocket, targetUserId) {
@@ -337,6 +399,22 @@ function requireDev(socket) {
   socket.emit(
     "error",
     createErrorResponse(ERROR_CODES.FORBIDDEN, "Dev access required."),
+  );
+  return false;
+}
+
+// Junior (level 1) mods are limited to low-risk actions. This gates the heavier
+// actions (ban, IP block, close/lock room, slow mode) to full (level 2) mods.
+// Devs always pass. Callers must still requireStaff() first.
+function requireModLevel(socket, minLevel) {
+  if (socket?.isDev) return true;
+  if (socket?.isMod && (socket.modLevel || 2) >= minLevel) return true;
+  socket.emit(
+    "error",
+    createErrorResponse(
+      ERROR_CODES.FORBIDDEN,
+      "This action needs a higher moderator level.",
+    ),
   );
   return false;
 }
@@ -368,6 +446,86 @@ function logStaff(socket, action, target, room, details) {
     ip: socket?.clientIp || null,
     details: details || null,
   });
+  // Watch mods (not devs - dev keys are owner-only) for action-rate abuse.
+  if (socket?.isMod && !socket?.isDev)
+    modwatch.record({
+      hash: socket.modKeyHash,
+      label,
+      role: roleTag,
+      action,
+      target: targetStr,
+      room: roomTag,
+    });
+}
+
+// Send the mod-application list to one staff socket (the IP is dev-only).
+function sendAppsList(s) {
+  if (!s) return;
+  const isDev = !!s.isDev;
+  s.emit(
+    "mod applications",
+    applications.list().map((a) => ({
+      id: a.id,
+      username: a.username,
+      answers: a.answers,
+      submittedAt: a.submittedAt,
+      status: a.status,
+      reviewedBy: a.reviewedBy,
+      reviewedAt: a.reviewedAt,
+      reason: a.reason,
+      claimed: a.claimed,
+      ip: isDev ? a.ip : undefined,
+    })),
+  );
+}
+
+// Push the updated application list to every reviewer (full mods + devs).
+function broadcastAppsList() {
+  if (!io()) return;
+  for (const [, s] of io().sockets.sockets)
+    if (s.isDev || (s.isMod && (s.modLevel || 2) >= 2)) sendAppsList(s);
+}
+
+// On an invitee's connect, credit their inviter if the invitee is now an active
+// member (and not sharing the inviter's IP). Power is never auto-granted: 10
+// active invites only auto-files a human-reviewed mod application; 100 is a
+// visible stretch goal that grants nothing.
+function handleInviteCredit(socket) {
+  if (!socket.deviceId) return;
+  invites.recordIp(socket.deviceId, socket.clientIp);
+  const res = invites.creditIfEligible(socket.deviceId, identity.isActive);
+  if (!res || !res.credited) return;
+  const inviterId = res.inviterDeviceId;
+  const inviterName = (identity.getRecord(inviterId) || {}).name || "A member";
+  if (res.newCount === invites.MILESTONE_MOD) {
+    if (!applications.pendingForDevice(inviterId)) {
+      applications.submit({
+        deviceId: inviterId,
+        ip: null,
+        username: inviterName,
+        answers: {
+          why: `Earned automatically by inviting ${res.newCount} active members.`,
+          availability: "",
+        },
+      });
+      broadcastAppsList();
+    }
+    audit.recordNotification({
+      kind: "invite",
+      text: `${inviterName} reached ${res.newCount} active invites - a mod application was auto-filed for review.`,
+      minLevel: 2,
+    });
+  } else if (res.newCount === invites.MILESTONE_DEV) {
+    audit.recordNotification({
+      kind: "invite",
+      text: `${inviterName} reached ${res.newCount} active invites.`,
+      minLevel: 2,
+    });
+  }
+  // Push fresh stats to the inviter if they're online.
+  for (const [, s] of io().sockets.sockets)
+    if (s.deviceId === inviterId)
+      s.emit("invite stats", invites.stats(inviterId));
 }
 
 // Per-IP throttle for the staff key-entry login, to blunt brute-force guessing.
@@ -514,7 +672,12 @@ function formatUserForSocket(user, recipientSocket) {
     id: user.id,
     username: user.username,
     location: user.location,
+    deviceType: user.deviceType || "unknown",
   };
+  // Top inviter trophy (1/2/3). Computed live; the device id itself is never
+  // sent to clients.
+  const inviteRank = invites.rankBadge(user.deviceId);
+  if (inviteRank) formatted.inviteRank = inviteRank;
 
   if (user.isHidden) {
     return formatted;
@@ -527,6 +690,7 @@ function formatUserForSocket(user, recipientSocket) {
   } else if (user.isMod) {
     // Mod badge is distinct from the dev crown; mods are never vanished.
     formatted.isMod = true;
+    formatted.modLevel = user.modLevel || 2;
   }
 
   return formatted;
@@ -574,14 +738,14 @@ function formatRoomForSocket(room, recipientSocket) {
     name: room.name,
     type: room.type,
     layout: room.layout,
-    isFull: joinableCount >= CONFIG.LIMITS.MAX_ROOM_CAPACITY,
+    isFull: joinableCount >= roomCapacity(room),
     userCount: joinableCount,
     visibleUserCount: users.length,
     lastChatActivity: state.roomLastChatActivity.get(room.id) || 0,
     createdAt: room.createdAt || room.lastActiveTime || 0,
     spotlight: !!room.spotlight,
     locked: !!room.locked,
-    capacity: CONFIG.LIMITS.MAX_ROOM_CAPACITY,
+    capacity: roomCapacity(room),
     users,
   };
 }
@@ -598,10 +762,10 @@ function formatRoomStateForSocket(room, recipientSocket) {
     users,
     votes: filterVotesForSocket(room, recipientSocket),
     currentMessages: filterCurrentMessagesForSocket(room, recipientSocket),
-    isFull: joinableCount >= CONFIG.LIMITS.MAX_ROOM_CAPACITY,
+    isFull: joinableCount >= roomCapacity(room),
     userCount: joinableCount,
     visibleUserCount: users.length,
-    capacity: CONFIG.LIMITS.MAX_ROOM_CAPACITY,
+    capacity: roomCapacity(room),
     locked: !!room.locked,
     slowMode: !!room.slowMode,
     spotlight: !!room.spotlight,
@@ -1224,7 +1388,7 @@ function joinRoom(socket, roomId, userId) {
     // Staff bypass room capacity (can always enter a full room to handle a
     // report); normal users check the visible count.
     const joinableUserCount = getJoinableUserCount(room);
-    if (!isStaff && joinableUserCount >= CONFIG.LIMITS.MAX_ROOM_CAPACITY)
+    if (!isStaff && joinableUserCount >= roomCapacity(room))
       return socket.emit(
         "room full",
         createErrorResponse(ERROR_CODES.ROOM_FULL, "Room is full."),
@@ -1240,8 +1404,11 @@ function joinRoom(socket, roomId, userId) {
       location,
       isDev: !!socket.isDev,
       isMod: !!socket.isMod,
+      modLevel: socket.isMod ? socket.modLevel || 2 : undefined,
       isHidden: !!socket.isHidden,
       isVanished: !!socket.isVanished,
+      deviceType: socket.deviceType || "unknown",
+      deviceId: socket.deviceId || null,
     });
 
     if (socket.isDev) {
@@ -1250,6 +1417,23 @@ function joinRoom(socket, roomId, userId) {
 
     room.lastActiveTime = Date.now();
     socket.roomId = roomId;
+
+    // One active room tab per browser: pause any OTHER tab of this session that
+    // is also in a room. Lobby-only tabs and the Mod Log are left alone, so a
+    // user can watch the lobby in one tab and chat in another.
+    if (socket.handshake?.sessionID && !socket.isModLog) {
+      const sid = socket.handshake.sessionID;
+      for (const [, other] of io().sockets.sockets) {
+        if (other.id === socket.id || other.isBot || other.isModLog) continue;
+        if (other.handshake?.sessionID !== sid) continue;
+        if (!other.roomId) continue; // lobby-only tab stays active
+        try {
+          other.emit("session superseded", {});
+          other.disconnect(true);
+        } catch (_) {}
+      }
+    }
+
     setupAFKTimers(socket, userId);
     updateRoomSoloTracking(roomId);
 
@@ -1291,6 +1475,7 @@ function emitJoinSuccess(socket, room, userId, username, location) {
     location,
     isDev: !!socket.isDev,
     isMod: !!socket.isMod,
+    modLevel: socket.isMod ? socket.modLevel || 2 : undefined,
     isHidden: !!socket.isHidden,
     isVanished: !!socket.isVanished,
   };
@@ -1303,6 +1488,7 @@ function emitJoinSuccess(socket, room, userId, username, location) {
     location,
     isDev: !!socket.isDev,
     isMod: !!socket.isMod,
+    modLevel: socket.isMod ? socket.modLevel || 2 : 0,
     isHidden: !!socket.isHidden,
     isVanished: !!socket.isVanished,
     roomName: room.name,
@@ -1310,6 +1496,7 @@ function emitJoinSuccess(socket, room, userId, username, location) {
     locked: !!room.locked,
     slowMode: !!room.slowMode,
     spotlight: !!room.spotlight,
+    maxSize: roomCapacity(room),
     users: filterUsersForSocket(room.users || [], socket),
     layout: room.layout,
     votes: filterVotesForSocket(room, socket),
@@ -1354,26 +1541,51 @@ function handleTyping(socket, userId, username, isTyping) {
 function registerSocketHandlers() {
   io().on("connection", (socket) => {
     const clientIp = socket.clientIp || socket.handshake.address;
+    socket.deviceType = deviceTypeFromUA(socket.handshake.headers["user-agent"]);
 
-    // ── Single active tab per browser session ──────────────────────────
-    // Identity is the session id (one per browser, shared across tabs). Two
-    // tabs therefore drove one identity, which crossed names and typed
-    // messages between them. The newest connection now supersedes older ones
-    // from the same session: the old tab is told and dropped, so only one tab
-    // is ever live. Bots (token identities) and the read-only Mod Log board
-    // are exempt, so the Mod Log can stay open beside a room.
-    socket.isModLog = socket.handshake?.auth?.app === "modlog";
-    if (!socket.isBot && !socket.isModLog && socket.handshake?.sessionID) {
-      const sid = socket.handshake.sessionID;
-      for (const [, other] of io().sockets.sockets) {
-        if (other.id === socket.id || other.isBot || other.isModLog) continue;
-        if (other.handshake?.sessionID !== sid) continue;
-        try {
-          other.emit("session superseded", {});
-          other.disconnect(true);
-        } catch (_) {}
+    // Durable per-browser device id: record presence for "active vs new" and
+    // invite credit. Not a secret; never gates a privileged action. Bots and
+    // the Mod Log board carry none, so this is a no-op for them.
+    if (socket.deviceId) {
+      identity.touch(
+        socket.deviceId,
+        clientIp,
+        socket.handshake?.session?.username,
+        socket.handshake?.session?.location,
+      );
+      socket._idAt = Date.now();
+      socket.emit("identity status", identity.summary(socket.deviceId));
+    }
+
+    // Deliver an approved-but-unclaimed mod application: mint the L1 key now
+    // (so nothing plaintext was ever stored) and hand it to this browser.
+    if (socket.deviceId && !socket.isDev && !socket.isMod) {
+      const claim = applications.unclaimedApproved(socket.deviceId);
+      if (claim) {
+        roles
+          .grantModKey(claim.username || "mod", 1)
+          .then((g) => {
+            applications.markClaimed(claim.id);
+            socket.emit("you are now mod", {
+              key: g.key,
+              label: g.label,
+              level: g.level,
+            });
+          })
+          .catch((e) => console.error("application claim grant failed:", e));
       }
     }
+
+    // Credit the inviter if this device just became an active invitee.
+    handleInviteCredit(socket);
+
+    // ── One active ROOM tab per browser session ─────────────────────────
+    // Identity is the session id (shared across a browser's tabs). Two tabs
+    // both in rooms would cross names and typed messages, so only one room tab
+    // is allowed at a time, enforced when a tab JOINS a room (see joinRoom).
+    // A lobby-only tab and the read-only Mod Log are always allowed, so you can
+    // watch the lobby in one tab and chat in another.
+    socket.isModLog = socket.handshake?.auth?.app === "modlog";
 
     // ── Staff key leak watch ────────────────────────────────────────────
     // A dev/mod key is the only proof of role, so a shared or stolen key is
@@ -1474,6 +1686,7 @@ function registerSocketHandlers() {
             isBot: !!socket.isBot,
             isDev: !!socket.isDev,
             isMod: !!socket.isMod,
+            modLevel: socket.isMod ? socket.modLevel || 2 : 0,
             isHidden: !!socket.isHidden,
           });
           socket.join("lobby");
@@ -1490,6 +1703,7 @@ function registerSocketHandlers() {
             isBot: !!socket.isBot,
             isDev: !!socket.isDev,
             isMod: !!socket.isMod,
+            modLevel: socket.isMod ? socket.modLevel || 2 : 0,
           });
         }
       }),
@@ -1587,6 +1801,11 @@ function registerSocketHandlers() {
           ip: socket.clientIp || null,
         });
 
+        // Keep this device's display name + location current so the invite
+        // lists and leaderboard show their real name, not an old guest one.
+        if (socket.deviceId)
+          identity.setName(socket.deviceId, username, location);
+
         if (socket.isDev) {
           state.devUsers.add(userId);
         }
@@ -1602,6 +1821,7 @@ function registerSocketHandlers() {
           isBot: !!socket.isBot,
           isDev: !!socket.isDev,
           isMod: !!socket.isMod,
+          modLevel: socket.isMod ? socket.modLevel || 2 : 0,
           isHidden: !!socket.isHidden,
         });
       }),
@@ -1743,7 +1963,7 @@ function registerSocketHandlers() {
         if (typeof id !== "string" || id.length > 64) return;
 
         const bs = getBoardState(socket.roomId);
-        // Ownership enforced here — you can only remove a stroke you own.
+        // Ownership enforced here - you can only remove a stroke you own.
         const idx = bs.strokes.findIndex(
           (s) => s.id === id && s.owner === userId,
         );
@@ -1852,8 +2072,9 @@ function registerSocketHandlers() {
       "board clear",
       safe(async () => {
         if (!socket.roomId || !socket.handshake.session?.userId) return;
-        // Talkoboard clear is staff-only.
-        if (!socket.isDev && !socket.isMod) return;
+        // Talkoboard clear is full-mod / dev only (junior mods cannot wipe it).
+        if (!socket.isDev && !(socket.isMod && (socket.modLevel || 2) >= 2))
+          return;
         const bs = boardState.get(socket.roomId);
         if (bs) {
           bs.strokes = [];
@@ -2140,7 +2361,7 @@ function registerSocketHandlers() {
         }
 
         // Semi-private rooms: session-validated codes skip the prompt.
-        // Staff bypass the code entirely (join bypass only — the codes
+        // Staff bypass the code entirely (join bypass only - the codes
         // themselves remain hidden from mods).
         if (room.type === "semi-private" && !socket.isDev && !socket.isMod) {
           const validated =
@@ -2199,7 +2420,7 @@ function registerSocketHandlers() {
         // Votes are only accepted at or above the minimum room size
         if (room.users.length < CONFIG.LIMITS.MIN_USERS_FOR_VOTING) return;
         if (!room.users.find((u) => u.id === data.targetUserId)) return;
-        // Staff cannot be vote-kicked — mods and devs are immune.
+        // Staff cannot be vote-kicked - mods and devs are immune.
         if (getUserStaffRole(data.targetUserId)) return;
         if (!room.votes) room.votes = {};
         if (room.votes[userId] === data.targetUserId) delete room.votes[userId];
@@ -2248,6 +2469,15 @@ function registerSocketHandlers() {
         if (socket.spectating) return;
         if (socket.frozen) return;
         const userId = socket.handshake.session.userId;
+        // Throttled participation signal for the activity record (Phase 2).
+        if (socket.deviceId && Date.now() - (socket._idTick || 0) > 30000) {
+          socket._idTick = Date.now();
+          identity.tick(
+            socket.deviceId,
+            socket.handshake.session.username,
+            socket.handshake.session.location,
+          );
+        }
         if (!data?.diff || typeof data.diff !== "object")
           return socket.emit(
             "error",
@@ -2583,7 +2813,10 @@ function registerSocketHandlers() {
             ),
           );
         const targetUser = room.users.find((u) => u.id === targetUserId);
-        const ban = data.ban !== false; // room ban on kick by default
+        // Junior (level 1) mods can remove a user but never place a room ban.
+        const canBan =
+          socket.isDev || (socket.isMod && (socket.modLevel || 2) >= 2);
+        const ban = canBan && data.ban !== false; // room ban: L2/dev only
         if (ban) {
           if (!room.bannedUserIds) room.bannedUserIds = new Set();
           room.bannedUserIds.add(targetUserId);
@@ -2617,6 +2850,7 @@ function registerSocketHandlers() {
       "staff ip block",
       safe(async (data) => {
         if (!requireStaff(socket)) return;
+        if (!requireModLevel(socket, 2)) return;
         const targetUserId = data?.targetUserId;
         const duration = data?.duration;
         if (!targetUserId)
@@ -2725,6 +2959,7 @@ function registerSocketHandlers() {
       "staff close room",
       safe(async (data) => {
         if (!requireStaff(socket)) return;
+        if (!requireModLevel(socket, 2)) return;
         const roomId = data?.roomId || socket.roomId;
         const room = roomId ? state.rooms.get(roomId) : null;
         if (!room)
@@ -2777,6 +3012,7 @@ function registerSocketHandlers() {
       "staff wipe buffer",
       safe(async (data) => {
         if (!requireStaff(socket)) return;
+        if (!requireModLevel(socket, 2)) return;
         const targetUserId = data?.targetUserId;
         if (!targetUserId)
           return socket.emit(
@@ -2971,6 +3207,7 @@ function registerSocketHandlers() {
       "staff lock room",
       safe(async (data) => {
         if (!requireStaff(socket)) return;
+        if (!requireModLevel(socket, 2)) return;
         const roomId = data?.roomId || socket.roomId;
         const room = roomId ? state.rooms.get(roomId) : null;
         if (!room)
@@ -2999,6 +3236,7 @@ function registerSocketHandlers() {
       "staff slow mode",
       safe(async (data) => {
         if (!requireStaff(socket)) return;
+        if (!requireModLevel(socket, 2)) return;
         const roomId = data?.roomId || socket.roomId;
         const room = roomId ? state.rooms.get(roomId) : null;
         if (!room)
@@ -3090,11 +3328,12 @@ function registerSocketHandlers() {
     // Staff (dev or mod) can watch a room live without taking a slot or
     // appearing. Role is carried in the payload so the client can build the
     // matching staff panel (devs keep full powers, incl. room size). IP
-    // context is still dev-only — sendDevRoomContext only targets dev sockets.
+    // context is still dev-only - sendDevRoomContext only targets dev sockets.
     socket.on(
       "staff spectate",
       safe(async (data) => {
         if (!requireStaff(socket)) return;
+        if (!requireModLevel(socket, 2)) return;
         const roomId = data?.roomId;
         const room = roomId ? state.rooms.get(roomId) : null;
         if (!room)
@@ -3121,6 +3360,7 @@ function registerSocketHandlers() {
           layout: room.layout,
           isDev: !!socket.isDev,
           isMod: !!socket.isMod,
+          modLevel: socket.isMod ? socket.modLevel || 2 : 0,
           locked: !!room.locked,
           slowMode: !!room.slowMode,
           spotlight: !!room.spotlight,
@@ -3264,6 +3504,38 @@ function registerSocketHandlers() {
     );
 
     socket.on(
+      "dev set room size",
+      safe(async (data) => {
+        if (!requireDev(socket)) return;
+        const roomId = data?.roomId || socket.roomId;
+        const room = roomId ? state.rooms.get(roomId) : null;
+        if (!room)
+          return socket.emit(
+            "error",
+            createErrorResponse(ERROR_CODES.NOT_FOUND, "Room not found."),
+          );
+        let n = Math.floor(Number(data?.size));
+        if (!Number.isFinite(n))
+          return socket.emit(
+            "error",
+            createErrorResponse(ERROR_CODES.BAD_REQUEST, "Invalid size."),
+          );
+        n = Math.max(2, Math.min(50, n));
+        room.maxSize = n;
+        updateRoom(roomId);
+        updateLobby();
+        state.apiCache.delete("public_rooms");
+        logStaff(socket, `set room size ${n}`, null, room);
+        socket.emit("staff action result", {
+          action: "room size",
+          ok: true,
+          roomId,
+          size: n,
+        });
+      }),
+    );
+
+    socket.on(
       "dev set flags",
       safe(async (data) => {
         if (!requireDev(socket)) return;
@@ -3296,7 +3568,7 @@ function registerSocketHandlers() {
           maintenance: state.maintenance,
         };
         logStaff(socket, "set flags", JSON.stringify(flags), "-");
-        // Capacity affects every room's isFull/display — refresh all views.
+        // Capacity affects every room's isFull/display - refresh all views.
         updateLobby();
         if (capacityChanged) for (const [rid] of state.rooms) updateRoom(rid);
         socket.emit("dev flags", flags);
@@ -3503,10 +3775,12 @@ function registerSocketHandlers() {
       safe(async (data) => {
         if (!requireDev(socket)) return;
         const label = typeof data?.label === "string" ? data.label : "mod";
-        const granted = await roles.grantModKey(label);
+        // Devs grant a full (level 2) key by default; level 1 on request.
+        const level = data?.level === 1 ? 1 : 2;
+        const granted = await roles.grantModKey(label, level);
         logStaff(
           socket,
-          "grant mod",
+          `grant mod L${granted.level}`,
           `${granted.label}(${granted.hash.slice(0, 8)})`,
           "-",
         );
@@ -3515,6 +3789,7 @@ function registerSocketHandlers() {
           key: granted.key,
           hash: granted.hash,
           label: granted.label,
+          level: granted.level,
         });
         socket.emit("dev mod keys", roles.listModKeys());
       }),
@@ -3537,6 +3812,7 @@ function registerSocketHandlers() {
             if (s.isMod && s.modKeyHash === hash) {
               s.isMod = false;
               s.modKeyHash = null;
+              s.modLevel = 0;
               s.staffLabel = null;
               const uid = s.handshake?.session?.userId;
               if (uid && s.roomId) {
@@ -3570,6 +3846,125 @@ function registerSocketHandlers() {
       }),
     );
 
+    // ── Promote / demote a mod's level by key hash (dev only) ───────────
+    // Only developers can change a moderator's level. L2 mods can mint L1
+    // keys but never raise anyone to L2.
+    socket.on(
+      "dev set mod level",
+      safe(async (data) => {
+        if (!requireDev(socket)) return;
+        const hash = typeof data?.hash === "string" ? data.hash : "";
+        const level = data?.level === 1 ? 1 : 2;
+        if (!hash)
+          return socket.emit(
+            "error",
+            createErrorResponse(ERROR_CODES.BAD_REQUEST, "hash required."),
+          );
+        const newLevel = await roles.setModLevel(hash, level);
+        if (newLevel == null)
+          return socket.emit(
+            "error",
+            createErrorResponse(ERROR_CODES.NOT_FOUND, "No such mod key."),
+          );
+        // Live-update any connected socket on this key so their powers and
+        // badge change without a reload.
+        for (const [, s] of io().sockets.sockets) {
+          if (s.isMod && s.modKeyHash === hash) {
+            s.modLevel = newLevel;
+            const uid = s.handshake?.session?.userId;
+            if (uid && s.roomId) {
+              const room = state.rooms.get(s.roomId);
+              const u = room?.users?.find((x) => x.id === uid);
+              if (u) {
+                u.modLevel = newLevel;
+                updateRoom(s.roomId);
+                updateLobby();
+              }
+            }
+            s.emit("staff level changed", { level: newLevel });
+          }
+        }
+        logStaff(socket, `set mod level L${newLevel}`, hash.slice(0, 8), "-");
+        socket.emit("dev mod keys", roles.listModKeys());
+        socket.emit("staff action result", {
+          action: "set mod level",
+          ok: true,
+          hash,
+          level: newLevel,
+        });
+      }),
+    );
+
+    // ── Promote / demote a connected user by userId (dev only) ──────────
+    // The in-room staff menu knows a user, not their key hash, so this
+    // resolves the user's live mod key(s) and re-levels them in place.
+    socket.on(
+      "dev set mod level for user",
+      safe(async (data) => {
+        if (!requireDev(socket)) return;
+        const targetUserId = data?.targetUserId;
+        const level = data?.level === 1 ? 1 : 2;
+        if (!targetUserId)
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.BAD_REQUEST,
+              "targetUserId required.",
+            ),
+          );
+        const targets = findSocketsByUserId(targetUserId);
+        const hashes = new Set();
+        for (const s of targets)
+          if (s.isMod && !s.isDev && s.modKeyHash) hashes.add(s.modKeyHash);
+        if (hashes.size === 0)
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.NOT_FOUND,
+              "That user is not a moderator.",
+            ),
+          );
+        let applied = 0;
+        for (const hash of hashes) {
+          const newLevel = await roles.setModLevel(hash, level);
+          if (newLevel == null) continue;
+          applied++;
+          for (const [, s] of io().sockets.sockets) {
+            if (s.isMod && s.modKeyHash === hash) {
+              s.modLevel = newLevel;
+              const uid = s.handshake?.session?.userId;
+              if (uid && s.roomId) {
+                const r = state.rooms.get(s.roomId);
+                const u = r?.users?.find((x) => x.id === uid);
+                if (u) {
+                  u.modLevel = newLevel;
+                  updateRoom(s.roomId);
+                  updateLobby();
+                }
+              }
+              s.emit("staff level changed", { level: newLevel });
+            }
+          }
+        }
+        const roomId = getUserCurrentRoom(targetUserId);
+        const room = roomId ? state.rooms.get(roomId) : null;
+        const targetUser = room?.users.find((u) => u.id === targetUserId);
+        logStaff(
+          socket,
+          `set mod level L${level} for user`,
+          targetUser || { id: targetUserId },
+          room || "-",
+        );
+        socket.emit("dev mod keys", roles.listModKeys());
+        socket.emit("staff action result", {
+          action: "set mod level",
+          ok: applied > 0,
+          targetUserId,
+          level,
+        });
+      }),
+    );
+
     // ── Accountability board feed (mod + dev) ───────────────────────────
     socket.on(
       "staff get audit",
@@ -3578,10 +3973,11 @@ function registerSocketHandlers() {
         audit.setAuditSub(socket, true);
         const limit = Math.min(Number(data?.limit) || 800, 2000);
         socket.emit("audit snapshot", {
-          entries: audit.recent(limit, !!socket.isDev),
+          entries: audit.recent(limit, !!socket.isDev, socket.modLevel || 2),
           me: {
             role: socket.isDev ? "dev" : "mod",
             label: socket.staffLabel || null,
+            modLevel: socket.isDev ? 0 : socket.modLevel || 2,
           },
           roster: {
             devs: roles.listDevKeys().map((d) => d.label),
@@ -3598,7 +3994,51 @@ function registerSocketHandlers() {
       }),
     );
 
-    // ── Comment on a log entry (mod + dev) — for accountability discussion ─
+    // ── Reports board (full mods + devs): who has been reported, with actions ─
+    socket.on(
+      "staff get reports",
+      safe(async () => {
+        if (!requireModLevel(socket, 2)) return;
+        const items = reports.summary().map((s) => {
+          const targets = findSocketsByUserId(s.targetKey);
+          const online = targets.length > 0;
+          let name = s.name;
+          let roomName = null;
+          if (online) {
+            const rid = getUserCurrentRoom(s.targetKey);
+            const room = rid ? state.rooms.get(rid) : null;
+            const u = room?.users.find((x) => x.id === s.targetKey);
+            name =
+              (u && u.username) ||
+              targets[0].handshake?.session?.username ||
+              name;
+            roomName = room?.name || null;
+          }
+          return {
+            targetUserId: s.targetKey,
+            name: name || "(unknown user)",
+            total: s.total,
+            distinct: s.distinct,
+            categories: s.categories,
+            online,
+            roomName,
+            reasons: reports
+              .forTarget(s.targetKey)
+              .slice(-8)
+              .reverse()
+              .map((r) => ({
+                category: r.category,
+                reason: r.reason,
+                by: r.byName,
+                at: r.at,
+              })),
+          };
+        });
+        socket.emit("staff reports", items);
+      }),
+    );
+
+    // ── Comment on a log entry (mod + dev) - for accountability discussion ─
     socket.on(
       "audit comment",
       safe(async (data) => {
@@ -3615,6 +4055,259 @@ function registerSocketHandlers() {
           label: socket.staffLabel || (socket.isDev ? "dev" : "mod"),
           text,
           ip: socket.clientIp || null,
+        });
+      }),
+    );
+
+    // ── User report → staff notification (anyone; rate-limited) ─────────
+    // Lets a normal user flag a problem to moderators. Surfaces as a dashboard
+    // notification and a live toast for full mods + devs (never junior mods).
+    socket.on(
+      "user report",
+      safe(async (data) => {
+        const now = Date.now();
+        if (now - (socket._lastReport || 0) < 30000)
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.RATE_LIMITED,
+              "Please wait a bit before sending another report.",
+            ),
+          );
+        const targetUserId =
+          typeof data?.targetUserId === "string" ? data.targetUserId : null;
+        const category =
+          typeof data?.category === "string" && REPORT_CATEGORIES[data.category]
+            ? data.category
+            : "other";
+        const reason = sanitizeMessage(
+          typeof data?.reason === "string" ? data.reason : "",
+        ).slice(0, 300);
+        const roomId = socket.roomId;
+        const room = roomId ? state.rooms.get(roomId) : null;
+        let targetName = null;
+        let targetSocket = null;
+        if (targetUserId) {
+          const tu = room?.users.find((u) => u.id === targetUserId);
+          targetName = tu?.username || null;
+          targetSocket = findSocketsByUserId(targetUserId)[0] || null;
+        }
+        if (!targetUserId || !targetName)
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.BAD_REQUEST,
+              "Pick someone in the room to report.",
+            ),
+          );
+        socket._lastReport = now;
+        const reporter = socket.handshake.session?.username || "A user";
+        const catLabel = REPORT_CATEGORIES[category];
+        const tally = reports.add({
+          targetKey: targetUserId,
+          targetName,
+          byDeviceId: socket.deviceId,
+          byName: reporter,
+          category,
+          reason,
+        });
+        const targetIsStaff =
+          !!targetSocket && (targetSocket.isDev || targetSocket.isMod);
+        const text =
+          `${reporter} reported ${targetName}${targetIsStaff ? " (staff)" : ""} for ${catLabel}` +
+          (reason ? `: ${reason}` : "") +
+          `. ${tally.distinct} ${tally.distinct === 1 ? "person has" : "people have"} reported ${targetName} recently.`;
+        audit.recordNotification({
+          kind: "report",
+          text,
+          target: `user:${targetName}(${targetUserId})`,
+          room: room ? `room:${room.name || "?"}(${room.id || "?"})` : null,
+          by: reporter,
+          minLevel: 2,
+        });
+        socket.emit("report received", {});
+      }),
+    );
+
+    // ── Mod applications: submit (active users) + review (full mods + devs) ─
+    socket.on(
+      "mod application submit",
+      safe(async (data) => {
+        if (!socket.deviceId)
+          return socket.emit("mod application result", {
+            ok: false,
+            error: "This browser can't be identified. Enable storage and retry.",
+          });
+        if (socket.isDev || socket.isMod)
+          return socket.emit("mod application result", {
+            ok: false,
+            error: "You're already staff.",
+          });
+        if (!identity.isActive(socket.deviceId))
+          return socket.emit("mod application result", {
+            ok: false,
+            error:
+              "You need to be a more active member before applying. Spend more time chatting and come back.",
+          });
+        const why = sanitizeMessage(
+          typeof data?.why === "string" ? data.why : "",
+        ).slice(0, 500);
+        const availability = sanitizeMessage(
+          typeof data?.availability === "string" ? data.availability : "",
+        ).slice(0, 120);
+        if (!why)
+          return socket.emit("mod application result", {
+            ok: false,
+            error: "Please say why you'd like to help moderate.",
+          });
+        const res = applications.submit({
+          deviceId: socket.deviceId,
+          ip: socket.clientIp,
+          username: socket.handshake.session?.username,
+          answers: { why, availability },
+        });
+        if (!res.ok) return socket.emit("mod application result", res);
+        audit.recordNotification({
+          kind: "application",
+          text: `New mod application from ${socket.handshake.session?.username || "a user"}`,
+          by: socket.handshake.session?.username || null,
+          minLevel: 2,
+        });
+        broadcastAppsList();
+        socket.emit("mod application result", { ok: true });
+      }),
+    );
+
+    socket.on(
+      "mod applications list",
+      safe(async () => {
+        if (!requireModLevel(socket, 2)) return;
+        sendAppsList(socket);
+      }),
+    );
+
+    socket.on(
+      "mod application review",
+      safe(async (data) => {
+        if (!requireModLevel(socket, 2)) return;
+        const id = Number(data?.id);
+        const decision = data?.decision;
+        const reason =
+          sanitizeMessage(
+            typeof data?.reason === "string" ? data.reason : "",
+          ).slice(0, 300) || null;
+        const app = applications.get(id);
+        if (!app || app.status !== "pending")
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.BAD_REQUEST,
+              "No such pending application.",
+            ),
+          );
+        const reviewer = `${socket.isDev ? "dev" : "mod"}:${socket.staffLabel || ""}`;
+        if (decision === "approve") {
+          applications.setStatus(id, "approved", reviewer, reason);
+          const targets = [];
+          for (const [, s] of io().sockets.sockets)
+            if (s.deviceId === app.deviceId && !s.isDev && !s.isMod)
+              targets.push(s);
+          if (targets.length) {
+            const granted = await roles.grantModKey(app.username || "mod", 1);
+            for (const s of targets)
+              s.emit("you are now mod", {
+                key: granted.key,
+                label: granted.label,
+                level: granted.level,
+              });
+            applications.markClaimed(id);
+            logStaff(
+              socket,
+              "approve mod application (delivered)",
+              { id: app.deviceId, username: app.username },
+              "-",
+              `label:${granted.label}`,
+            );
+          } else {
+            logStaff(
+              socket,
+              "approve mod application (pending claim)",
+              { id: app.deviceId, username: app.username },
+              "-",
+            );
+          }
+        } else if (decision === "reject") {
+          applications.setStatus(id, "rejected", reviewer, reason);
+          logStaff(
+            socket,
+            "reject mod application",
+            { id: app.deviceId, username: app.username },
+            "-",
+            reason || undefined,
+          );
+        } else {
+          return socket.emit(
+            "error",
+            createErrorResponse(ERROR_CODES.BAD_REQUEST, "Unknown decision."),
+          );
+        }
+        broadcastAppsList();
+        socket.emit("staff action result", {
+          action: "review application",
+          ok: true,
+          id,
+        });
+      }),
+    );
+
+    // ── Invites + leaderboard (open to everyone) ────────────────────────
+    socket.on(
+      "invite ref",
+      safe(async (data) => {
+        if (!socket.deviceId) return;
+        const code =
+          typeof data?.code === "string" ? data.code.trim().slice(0, 32) : "";
+        if (!code) return;
+        invites.setReferrer(socket.deviceId, code, socket.clientIp);
+      }),
+    );
+
+    socket.on(
+      "leaderboard get",
+      safe(async () => {
+        const now = Date.now();
+        if (now - (socket._lbAt || 0) < 3000) return; // light throttle
+        socket._lbAt = now;
+        const top = invites.leaderboard(100).map((e) => {
+          const r = identity.getRecord(e.deviceId) || {};
+          return {
+            name: r.name || "Anonymous",
+            location: r.loc || "",
+            credited: e.credited,
+          };
+        });
+        const you = socket.deviceId
+          ? Object.assign(invites.stats(socket.deviceId), {
+              rank: invites.rankOf(socket.deviceId),
+              invitees: invites
+                .invitees(socket.deviceId)
+                .map((iv) => {
+                  const r = identity.getRecord(iv.deviceId) || {};
+                  return {
+                    name: r.name || "Someone",
+                    location: r.loc || "",
+                    status: iv.credited ? "active" : "pending",
+                    at: iv.at,
+                  };
+                })
+                .sort((a, b) => b.at - a.at)
+                .slice(0, 50),
+            })
+          : null;
+        socket.emit("leaderboard data", {
+          top,
+          you,
+          milestones: { mod: invites.MILESTONE_MOD, dev: invites.MILESTONE_DEV },
         });
       }),
     );
@@ -3656,11 +4349,25 @@ function registerSocketHandlers() {
 
     // ── Promote a connected user to mod, in-site (dev) ──────────────────
     // Generates a mod key and delivers it privately to that user's socket,
-    // which stores it and reloads — no manual key hand-off.
+    // which stores it and reloads - no manual key hand-off.
     socket.on(
       "dev grant mod to user",
       safe(async (data) => {
-        if (!requireDev(socket)) return;
+        if (!requireStaff(socket)) return;
+        // Who may grant, and at what level: devs grant level 1 or 2 (full by
+        // default); full (level 2) mods may grant level 1 only; junior (level 1)
+        // mods cannot grant at all.
+        let grantLevel;
+        if (socket.isDev) grantLevel = data?.level === 1 ? 1 : 2;
+        else if (socket.isMod && (socket.modLevel || 2) >= 2) grantLevel = 1;
+        else
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.FORBIDDEN,
+              "You cannot grant a moderator role.",
+            ),
+          );
         const targetUserId = data?.targetUserId;
         if (!targetUserId)
           return socket.emit(
@@ -3687,7 +4394,7 @@ function registerSocketHandlers() {
         const roomId = getUserCurrentRoom(targetUserId);
         const room = roomId ? state.rooms.get(roomId) : null;
         const targetUser = room?.users.find((u) => u.id === targetUserId);
-        // Clear any votes already cast against them — staff are vote-immune, so
+        // Clear any votes already cast against them - staff are vote-immune, so
         // stale pre-promotion votes shouldn't linger.
         if (room?.votes) {
           let changed = false;
@@ -3703,12 +4410,16 @@ function registerSocketHandlers() {
           targetUser?.username ||
           "mod";
         label = label.slice(0, 40);
-        const granted = await roles.grantModKey(label);
+        const granted = await roles.grantModKey(label, grantLevel);
         for (const s of targets)
-          s.emit("you are now mod", { key: granted.key, label: granted.label });
+          s.emit("you are now mod", {
+            key: granted.key,
+            label: granted.label,
+            level: granted.level,
+          });
         logStaff(
           socket,
-          "grant mod to user",
+          `grant mod L${granted.level} to user`,
           targetUser || { id: targetUserId },
           room || "-",
           `label:${granted.label}`,
@@ -3717,8 +4428,10 @@ function registerSocketHandlers() {
           action: "make mod",
           ok: true,
           targetUserId,
+          level: granted.level,
         });
-        socket.emit("dev mod keys", roles.listModKeys());
+        // Only devs receive the full key roster (hashes/labels/levels).
+        if (socket.isDev) socket.emit("dev mod keys", roles.listModKeys());
       }),
     );
 
@@ -3761,6 +4474,7 @@ function registerSocketHandlers() {
             if (s.isMod && s.modKeyHash === hash) {
               s.isMod = false;
               s.modKeyHash = null;
+              s.modLevel = 0;
               s.staffLabel = null;
               const uid = s.handshake?.session?.userId;
               if (uid && s.roomId) {
@@ -3807,6 +4521,11 @@ function registerSocketHandlers() {
         const userId = socket.handshake.session?.userId;
         const username = socket.handshake.session?.username || "Unknown";
         const location = socket.handshake.session?.location || "Unknown";
+        if (socket.deviceId)
+          identity.addTime(
+            socket.deviceId,
+            Date.now() - (socket._idAt || Date.now()),
+          );
         if (userId) {
           clearAFKTimers(userId);
           await leaveRoom(socket, userId);

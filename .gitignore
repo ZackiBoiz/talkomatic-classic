@@ -4,6 +4,7 @@ repo-tree.html
 CLAUDE.md
 talkomatic-v4.pdf
 update.md
+STAFF-V5-PLAN.md
 
 # Staff key store and audit logs (never commit)
 mod-keys.json
@@ -13,6 +14,11 @@ key-activity.json
 
 # Runtime counters
 anniversary.json
+
+# Staff v5 runtime data (identity, invites, applications) — never commit
+identity.json
+invites.json
+mod-applications.json
 
 # Dependency directories
 node_modules/

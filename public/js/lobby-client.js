@@ -1,12 +1,12 @@
 // ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║  lobby-client.js — Talkomatic Lobby Client                                ║
+// ║  lobby-client.js - Talkomatic Lobby Client                                ║
 // ║  Server statistics, anti-spam lobby sorting, lobby visibility             ║
 // ║                                                                           ║
 // ║  PATCHED (June 2026 anniversary batch):                                   ║
 // ║  • FIX #4: Access codes are NEVER placed in redirect URLs anymore.        ║
 // ║    The server validates the code and stores it in the session BEFORE      ║
 // ║    emitting "room joined" / "room created", so the room page joins        ║
-// ║    via the session — no ?accessCode= in the address bar, history,         ║
+// ║    via the session - no ?accessCode= in the address bar, history,         ║
 // ║    or analytics. The lastUsedAccessCode variable has been removed         ║
 // ║    entirely since it only existed to build those URLs.                    ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
@@ -418,6 +418,9 @@ const socket = io({
   auth: {
     devKey: localStorage.getItem("talkomatic_devKey") || undefined,
     modKey: localStorage.getItem("talkomatic_modKey") || undefined,
+    deviceId:
+      (window.TalkomaticIdentity && window.TalkomaticIdentity.deviceId) ||
+      undefined,
   },
 });
 
@@ -458,6 +461,32 @@ let devLobbyCodes = {};
 let statsModal = null;
 let currentUserIsDev = false;
 let currentUserIsMod = false;
+let currentUserModLevel = 0; // 0 = not a mod, 1 = junior, 2 = full
+
+// Top-3 inviter trophy images (gold/silver/bronze) shown left of the username.
+const TROPHY_SRC = {
+  1: "images/icons/trophy-gold.png",
+  2: "images/icons/trophy-silver.png",
+  3: "images/icons/trophy-bronze.png",
+};
+function trophyImgFor(rank) {
+  const src = TROPHY_SRC[rank];
+  if (!src) return null;
+  const img = document.createElement("img");
+  img.src = src;
+  img.alt = "";
+  img.className = "invite-trophy";
+  img.title =
+    rank === 1
+      ? "Top inviter"
+      : rank === 2
+        ? "2nd most invites"
+        : "3rd most invites";
+  img.onerror = function () {
+    this.style.display = "none";
+  };
+  return img;
+}
 
 // ============================================================================
 // 6. SIGN-IN HELPERS
@@ -910,13 +939,13 @@ socket.on("access code required", () => {
 
 // FIX #4: Redirect with roomId ONLY. The server has already validated and
 // stored the access code in the session (it awaits the session save before
-// emitting this event), so room.html joins via the session — the code never
+// emitting this event), so room.html joins via the session - the code never
 // touches the URL, browser history, or analytics.
 socket.on("room joined", (data) => {
   window.location.href = `/room.html?roomId=${data.roomId}`;
 });
 
-// FIX #4: Same for room creation — roomId only.
+// FIX #4: Same for room creation - roomId only.
 socket.on("room created", (roomId) => {
   window.location.href = `/room.html?roomId=${roomId}`;
 });
@@ -928,6 +957,7 @@ socket.on("room created", (roomId) => {
 socket.on("signin status", (data) => {
   currentUserIsDev = !!data.isDev;
   currentUserIsMod = !!data.isMod;
+  currentUserModLevel = data.modLevel || 0;
   if (currentUserIsDev) ensureDevPanelButton();
   updateStaffLink();
   if (data.isSignedIn) {
@@ -1058,6 +1088,9 @@ function createRoomElement(room) {
 
     userDiv.appendChild(userNumberSpan);
 
+    const lobbyTrophy = trophyImgFor(user.inviteRank);
+    if (lobbyTrophy) userDiv.appendChild(lobbyTrophy);
+
     if (user.isDev && !user.isHidden) {
       const crown = document.createElement("img");
       crown.src = "images/icons/crown.gif";
@@ -1067,9 +1100,13 @@ function createRoomElement(room) {
     }
 
     if (user.isMod && !user.isDev && !user.isHidden) {
+      const jr = (user.modLevel || 2) === 1;
       const mb = document.createElement("span");
-      mb.className = "mod-lobby-badge";
-      mb.textContent = "MOD";
+      mb.className = jr
+        ? "mod-lobby-badge mod-lobby-badge-jr"
+        : "mod-lobby-badge";
+      mb.textContent = jr ? "JR MOD" : "MOD";
+      mb.title = jr ? "Junior moderator (level 1)" : "Moderator";
       userDiv.appendChild(mb);
     }
 
@@ -1096,7 +1133,7 @@ function createRoomElement(room) {
   roomElement.appendChild(roomTop);
 
   // Per-room staff controls: spectate is dev + mod; spotlight stays dev-only.
-  if (currentUserIsDev || currentUserIsMod) {
+  if (currentUserIsDev || (currentUserIsMod && currentUserModLevel >= 2)) {
     const devRow = document.createElement("div");
     devRow.className = "lobby-dev-controls";
 
@@ -1219,7 +1256,7 @@ function initLobby() {
 
   // Guard the optional stats button: it was removed from the lobby menu, so
   // getElementById returns null. Without this guard the throw aborts the rest
-  // of initLobby — including the Update Notes binding below.
+  // of initLobby - including the Update Notes binding below.
   const statsBtn = document.getElementById("statsForNerdsButton");
   if (statsBtn)
     statsBtn.addEventListener("click", (e) => {
@@ -1295,7 +1332,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// 14. DEV / STAFF UI (lobby) — built on the shared StaffUI kit. The server
+// 14. DEV / STAFF UI (lobby) - built on the shared StaffUI kit. The server
 // validates the dev key on every action; this layer is presentation only.
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -1339,9 +1376,11 @@ function openDevPanel() {
             label: "Grant mod key…",
             desc: "Create a key for a new mod (shown once)",
             onClick: async () => {
-              const label = await StaffUI.prompt({
+              const r = await StaffUI.prompt({
                 title: "Grant mod key",
                 icon: '<i class="fas fa-user-plus"></i>',
+                message:
+                  "Junior (L1) mods can kick and warn but cannot ban or IP-block. Promote them to full (L2) later from the Manage list.",
                 fields: [
                   {
                     name: "value",
@@ -1350,10 +1389,24 @@ function openDevPanel() {
                     required: true,
                     maxLength: 40,
                   },
+                  {
+                    name: "level",
+                    label: "Level",
+                    type: "select",
+                    value: "1",
+                    options: [
+                      { value: "1", label: "Junior mod (L1) - limited" },
+                      { value: "2", label: "Full mod (L2) - all powers" },
+                    ],
+                  },
                 ],
                 confirmText: "Generate key",
               });
-              if (label) socket.emit("dev grant mod", { label });
+              if (r && r.value)
+                socket.emit("dev grant mod", {
+                  label: r.value,
+                  level: Number(r.level),
+                });
             },
           },
           {
@@ -1506,7 +1559,7 @@ socket.on("dev mod granted", (data) => {
   const wrap = StaffUI.el("div");
   wrap.appendChild(
     StaffUI.el("p", {
-      text: `New mod key for "${data.label}". This is shown ONCE, so copy it now and send it to them.`,
+      text: `New ${data.level === 1 ? "junior (L1)" : "full (L2)"} mod key for "${data.label}". This is shown ONCE, so copy it now and send it to them.`,
     }),
   );
   const input = StaffUI.el("input", {
@@ -1558,27 +1611,78 @@ socket.on("dev mod granted", (data) => {
   });
 });
 
+// Per-key actions: promote/demote level or revoke. Opened from the manage list.
+function openModKeyActions(k) {
+  if (!window.StaffUI) return;
+  const toLevel = k.level === 1 ? 2 : 1;
+  StaffUI.menu({
+    title: k.label,
+    icon: '<i class="fas fa-user-shield"></i>',
+    subtitle: `Level ${k.level === 1 ? 1 : 2} · key ${k.hash.slice(0, 12)}…`,
+    groups: [
+      {
+        items: [
+          {
+            icon:
+              toLevel === 2
+                ? '<i class="fas fa-arrow-up"></i>'
+                : '<i class="fas fa-arrow-down"></i>',
+            label:
+              toLevel === 2
+                ? "Promote to full mod (L2)"
+                : "Demote to junior (L1)",
+            desc:
+              toLevel === 2
+                ? "Grant ban + IP block powers"
+                : "Limit to junior powers",
+            onClick: async () => {
+              const ok = await StaffUI.confirm({
+                title: toLevel === 2 ? "Promote to L2" : "Demote to L1",
+                message:
+                  toLevel === 2
+                    ? `Give "${k.label}" full (level 2) powers?`
+                    : `Limit "${k.label}" to junior (level 1) powers?`,
+                confirmText: toLevel === 2 ? "Promote" : "Demote",
+              });
+              if (ok)
+                socket.emit("dev set mod level", {
+                  hash: k.hash,
+                  level: toLevel,
+                });
+            },
+          },
+          {
+            icon: '<i class="fas fa-user-xmark"></i>',
+            label: "Revoke mod key",
+            desc: "Remove their access instantly",
+            danger: true,
+            onClick: async () => {
+              const ok = await StaffUI.confirm({
+                title: "Revoke mod",
+                message: `Revoke "${k.label}"? They are downgraded instantly.`,
+                danger: true,
+                confirmText: "Revoke",
+              });
+              if (ok) socket.emit("dev revoke mod", { hash: k.hash });
+            },
+          },
+        ],
+      },
+    ],
+    onHelp: () => StaffUI.help("dev"),
+  });
+}
+
 socket.on("dev mod keys", (keys) => {
   if (!manageKeysOpen || !window.StaffUI) return;
   const list = Array.isArray(keys) ? keys : [];
   const items = list.length
     ? list.map((k) => ({
         icon: '<i class="fas fa-user-shield"></i>',
-        label: k.label,
+        label: `${k.label} - ${k.level === 1 ? "L1" : "L2"}`,
         desc: "key " + k.hash.slice(0, 12) + "…",
-        danger: true,
         keepOpen: true,
-        onClick: async () => {
-          if (
-            await StaffUI.confirm({
-              title: "Revoke mod",
-              message: `Revoke "${k.label}"? They are downgraded instantly.`,
-              danger: true,
-              confirmText: "Revoke",
-            })
-          )
-            socket.emit("dev revoke mod", { hash: k.hash });
-        },
+        onClick: () => openModKeyActions(k),
       }))
     : [
         {
@@ -1750,6 +1854,7 @@ socket.on("staff action result", (data) => {
 socket.on("staff revoked", () => {
   localStorage.removeItem("talkomatic_modKey");
   currentUserIsMod = false;
+  currentUserModLevel = 0;
   lobbyNotify("Your mod key was revoked.", "warning", { timeout: 6000 });
   setTimeout(() => window.location.reload(), 1500);
 });
@@ -1804,12 +1909,68 @@ socket.on("staff key result", (d) => {
 socket.on("you are now mod", (d) => {
   if (!d || !d.key) return;
   localStorage.setItem("talkomatic_modKey", d.key);
-  lobbyNotify("You've been promoted to Moderator! Reloading…", "success", {
-    title: "You are now a mod",
-    timeout: 4000,
-  });
+  lobbyNotify(
+    d.level === 2
+      ? "You've been promoted to Moderator (full)! Reloading…"
+      : "You've been made a Junior Moderator! Reloading…",
+    "success",
+    { title: "You are now a mod", timeout: 4000 },
+  );
   setTimeout(() => window.location.reload(), 1600);
 });
+socket.on("staff level changed", (d) => {
+  if (!d) return;
+  currentUserModLevel = d.level === 1 ? 1 : 2;
+  lobbyNotify(
+    currentUserModLevel >= 2
+      ? "You are now a full (level 2) moderator."
+      : "Your moderator level is now junior (level 1).",
+    "info",
+    { timeout: 6000 },
+  );
+});
+// Device identity: stash the activity summary for later features (leaderboard,
+// mod applications) and warn once if this browser's id had to be restored from
+// a backup layer because localStorage was cleared.
+socket.on("identity status", (d) => {
+  if (window.TalkomaticIdentity) window.TalkomaticIdentity.activity = d || null;
+});
+// Staff-only live alerts (reports, mod-abuse flags), pushed by the server only
+// to qualifying staff sockets.
+socket.on("staff notice", (d) => {
+  if (d && d.text && typeof lobbyNotify === "function")
+    lobbyNotify(d.text, "warning", { title: "Staff alert", timeout: 8000 });
+});
+
+// Invite referral capture: ?ref=CODE records (once, server-side) who referred
+// this browser. The credit only lands when the invitee becomes active.
+(function captureInviteRef() {
+  try {
+    const code = new URLSearchParams(window.location.search).get("ref");
+    if (!code) return;
+    const send = () => socket.emit("invite ref", { code });
+    socket.on("connect", send);
+    if (socket.connected) send();
+    const url = new URL(window.location.href);
+    url.searchParams.delete("ref");
+    window.history.replaceState({}, document.title, url);
+  } catch (e) {}
+})();
+(function warnIfIdentityRestored() {
+  if (typeof lobbyNotify !== "function" || !window.TalkomaticIdentity) return;
+  const warn = () => {
+    if (window.TalkomaticIdentity && window.TalkomaticIdentity.restored)
+      lobbyNotify(
+        "This browser's saved data looks cleared. Your stats and invite credit are tied to this browser - keep its data to keep them.",
+        "warning",
+        { timeout: 9000 },
+      );
+  };
+  if (window.TalkomaticIdentity.restored) warn();
+  else if (window.TalkomaticIdentity.ready)
+    window.TalkomaticIdentity.ready.then(warn);
+})();
+
 // Key entry is reachable from the "Staff Access" link in the lobby menu, by
 // opening the lobby with #staff in the URL, or via the deep link from mod.html.
 const staffLoginLink = document.getElementById("staffLoginLink");
@@ -1823,16 +1984,563 @@ if (staffLoginLink)
     else openStaffKeyEntry();
   });
 
+// Mod application (active members only; the server re-checks "active").
+async function openModApply() {
+  if (currentUserIsDev || currentUserIsMod) {
+    lobbyNotify("You're already staff.", "info");
+    return;
+  }
+  if (!window.StaffUI) return;
+  const act = window.TalkomaticIdentity && window.TalkomaticIdentity.activity;
+  if (!act || !act.active) {
+    const need = (act && act.need) || { days: 2, minutes: 15, acts: 10 };
+    const have = {
+      days: (act && act.days) || 0,
+      minutes: (act && act.minutes) || 0,
+      acts: (act && act.acts) || 0,
+    };
+    const body = document.createElement("div");
+    const p = document.createElement("p");
+    p.textContent =
+      "Moderator applications open up once you are an active member. Keep chatting across a few days and this unlocks automatically. Your progress:";
+    body.appendChild(p);
+    const list = document.createElement("div");
+    list.style.cssText = "margin-top:12px;font-size:14px;line-height:2.1;";
+    const line = (label, h, w) => {
+      const row = document.createElement("div");
+      const done = h >= w;
+      row.textContent =
+        (done ? "✓ " : "• ") +
+        label +
+        ": " +
+        Math.min(h, w) +
+        " of " +
+        w;
+      row.style.color = done ? "#57d9a3" : "#cfd3da";
+      return row;
+    };
+    list.appendChild(line("Days visited", have.days, need.days));
+    list.appendChild(line("Active minutes", have.minutes, need.minutes));
+    list.appendChild(line("Chat activity", have.acts, need.acts));
+    body.appendChild(list);
+    StaffUI.modal({
+      title: "Become a moderator",
+      icon: '<i class="fas fa-user-clock"></i>',
+      body: body,
+      actions: [{ label: "Got it", kind: "primary", onClick: () => {} }],
+    });
+    return;
+  }
+  const r = await StaffUI.prompt({
+    title: "Apply to moderate",
+    icon: '<i class="fas fa-user-pen"></i>',
+    subtitle: "Junior moderators help keep rooms friendly",
+    message:
+      "If approved you'll get a junior moderator role - you can kick and warn, but not ban or IP-block. Misuse loses it; trusted juniors may be promoted later by a dev.",
+    fields: [
+      {
+        name: "why",
+        label: "Why do you want to help moderate?",
+        type: "textarea",
+        maxLength: 500,
+        required: true,
+        placeholder: "Tell us a little about yourself…",
+      },
+      {
+        name: "availability",
+        label: "When are you usually online? (optional)",
+        type: "text",
+        maxLength: 120,
+        placeholder: "e.g. evenings, UTC",
+      },
+    ],
+    confirmText: "Send application",
+  });
+  if (r && r.why)
+    socket.emit("mod application submit", {
+      why: r.why,
+      availability: r.availability,
+    });
+}
+const modApplyLink = document.getElementById("modApplyLink");
+if (modApplyLink)
+  modApplyLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    openModApply();
+  });
+socket.on("mod application result", (d) => {
+  if (!d) return;
+  if (d.ok)
+    lobbyNotify(
+      "Application sent! Staff will review it. Thanks for stepping up.",
+      "success",
+      { timeout: 7000 },
+    );
+  else
+    lobbyNotify(d.error || "Could not send your application.", "error", {
+      timeout: 7000,
+    });
+});
+
+// ── Invite leaderboard: a custom, large, centered modal with two tabs ───────
+let lbData = null;
+let lbTab = "global";
+let lbPage = 0;
+let lbContentEl = null; // scrollable content area (null when closed)
+let lbOverlay = null; // modal overlay element (null when closed)
+let lbTimer = null;
+let lbCountdown = 0;
+const LB_PAGE_SIZE = 25;
+const LB_REFRESH_SEC = 20;
+
+function lbEscHandler(e) {
+  if (e.key === "Escape") closeLeaderboard();
+}
+
+function closeLeaderboard() {
+  if (lbTimer) {
+    clearInterval(lbTimer);
+    lbTimer = null;
+  }
+  document.removeEventListener("keydown", lbEscHandler);
+  if (lbOverlay && lbOverlay.parentNode)
+    lbOverlay.parentNode.removeChild(lbOverlay);
+  lbOverlay = null;
+  lbContentEl = null;
+}
+
+function startLbLoops() {
+  if (lbTimer) clearInterval(lbTimer);
+  lbCountdown = LB_REFRESH_SEC;
+  lbTimer = setInterval(() => {
+    lbCountdown--;
+    const el = document.getElementById("lbCountdownEl");
+    if (el) el.textContent = "Refreshing in " + lbCountdown + "s";
+    if (lbCountdown <= 0) {
+      lbCountdown = LB_REFRESH_SEC;
+      socket.emit("leaderboard get");
+    }
+  }, 1000);
+}
+
+function switchLbTab(tab, activeBtn, otherBtn) {
+  if (lbTab === tab) return;
+  lbTab = tab;
+  lbPage = 0;
+  activeBtn.classList.add("active");
+  otherBtn.classList.remove("active");
+  renderLbContent();
+}
+
+function openLeaderboard() {
+  ensureLeaderboardStyles();
+  if (lbOverlay) closeLeaderboard();
+  lbTab = "global";
+  lbPage = 0;
+
+  const overlay = document.createElement("div");
+  overlay.className = "lb-overlay";
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) closeLeaderboard();
+  });
+
+  const card = document.createElement("div");
+  card.className = "lb-card";
+  overlay.appendChild(card);
+
+  const head = document.createElement("div");
+  head.className = "lb-head";
+  const title = document.createElement("div");
+  title.className = "lb-title";
+  title.innerHTML = '<i class="fas fa-trophy"></i> Leaderboard';
+  const x = document.createElement("button");
+  x.className = "lb-x";
+  x.setAttribute("aria-label", "Close");
+  x.textContent = "×";
+  x.addEventListener("click", closeLeaderboard);
+  head.appendChild(title);
+  head.appendChild(x);
+  card.appendChild(head);
+
+  const tabs = document.createElement("div");
+  tabs.className = "lb-tabs";
+  const tabGlobal = document.createElement("button");
+  tabGlobal.className = "lb-tab active";
+  tabGlobal.textContent = "Global leaderboard";
+  const tabInv = document.createElement("button");
+  tabInv.className = "lb-tab";
+  tabInv.textContent = "Your invites";
+  tabGlobal.addEventListener("click", () =>
+    switchLbTab("global", tabGlobal, tabInv),
+  );
+  tabInv.addEventListener("click", () =>
+    switchLbTab("invites", tabInv, tabGlobal),
+  );
+  tabs.appendChild(tabGlobal);
+  tabs.appendChild(tabInv);
+  card.appendChild(tabs);
+
+  const content = document.createElement("div");
+  content.className = "lb-content";
+  lbContentEl = content;
+  card.appendChild(content);
+
+  const foot = document.createElement("div");
+  foot.className = "lb-foot";
+  const cd = document.createElement("span");
+  cd.id = "lbCountdownEl";
+  cd.textContent = "Refreshing in " + LB_REFRESH_SEC + "s";
+  foot.appendChild(cd);
+  card.appendChild(foot);
+
+  document.addEventListener("keydown", lbEscHandler);
+  document.body.appendChild(overlay);
+  lbOverlay = overlay;
+
+  renderLbContent();
+  startLbLoops();
+  socket.emit("leaderboard get");
+}
+
+socket.on("leaderboard data", (d) => {
+  lbData = d;
+  if (lbContentEl) renderLbContent();
+});
+function ensureLeaderboardStyles() {
+  if (document.getElementById("tk-lb-styles")) return;
+  const css = [
+    ".lb-overlay{position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.72);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:20px;}",
+    ".lb-card{width:100%;max-width:760px;max-height:88vh;display:flex;flex-direction:column;background:#121317;border:1px solid #2c2f37;border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.6);overflow:hidden;}",
+    ".lb-head{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid #23262e;}",
+    ".lb-title{flex:1;font-size:19px;font-weight:700;color:#fff;}",
+    ".lb-title i{color:#ff9800;margin-right:8px;}",
+    ".lb-x{background:none;border:none;color:#9aa0aa;font-size:26px;line-height:1;cursor:pointer;padding:0 6px;}",
+    ".lb-x:hover{color:#fff;}",
+    ".lb-tabs{display:flex;gap:4px;padding:0 20px;border-bottom:1px solid #23262e;}",
+    ".lb-tab{background:none;border:none;border-bottom:2px solid transparent;color:#9aa0aa;font-size:14px;font-weight:600;padding:12px 14px;cursor:pointer;}",
+    ".lb-tab:hover{color:#cfd3da;}",
+    ".lb-tab.active{color:#ff9800;border-bottom-color:#ff9800;}",
+    ".lb-content{flex:1;overflow-y:auto;padding:20px;}",
+    ".lb-foot{padding:10px 20px;border-top:1px solid #23262e;text-align:center;color:#7f8794;font-size:12px;}",
+    "@media (max-width:560px){.lb-overlay{padding:0;}.lb-card{max-width:100%;width:100%;height:100%;max-height:100%;border-radius:0;}}",
+    ".tk-lb-hero{background:#0e0f12;border:1px solid #23262e;border-radius:10px;padding:14px;margin-bottom:14px;}",
+    ".tk-lb-hero h4{margin:0 0 8px;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:#9aa0aa;}",
+    ".tk-lb-linkrow{display:flex;gap:8px;}",
+    ".tk-lb-link{flex:1;min-width:0;background:#000;border:1px solid #2c2f37;border-radius:7px;color:#ffce85;font-family:monospace;font-size:13px;padding:9px 10px;}",
+    ".tk-lb-copy{background:#ff9800;color:#1a1206;border:none;border-radius:7px;font-weight:700;padding:0 16px;cursor:pointer;}",
+    ".tk-lb-copy:hover{background:#ffa726;}",
+    ".tk-lb-note{margin-top:8px;font-size:11.5px;color:#9aa0aa;}",
+    ".tk-lb-chips{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;}",
+    ".tk-lb-chip{flex:1;min-width:90px;background:#15161a;border:1px solid #23262e;border-radius:9px;padding:10px;text-align:center;}",
+    ".tk-lb-chip b{display:block;font-size:22px;color:#ff9800;line-height:1.15;}",
+    ".tk-lb-chip span{font-size:10.5px;color:#9aa0aa;text-transform:uppercase;letter-spacing:.5px;}",
+    ".tk-lb-goal{margin-bottom:10px;}",
+    ".tk-lb-goal .gl{display:flex;justify-content:space-between;font-size:12.5px;color:#cfd3da;margin-bottom:4px;}",
+    ".tk-lb-bar{height:8px;background:#23262e;border-radius:6px;overflow:hidden;}",
+    ".tk-lb-bar i{display:block;height:100%;background:linear-gradient(90deg,#ff9800,#ffce85);}",
+    ".tk-lb-sec{margin-top:16px;}",
+    ".tk-lb-sec h4{margin:0 0 8px;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:#9aa0aa;}",
+    ".tk-lb-list{max-height:200px;overflow:auto;border:1px solid #23262e;border-radius:9px;}",
+    ".tk-lb-row{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid #1c1f26;font-size:13px;}",
+    ".tk-lb-row:last-child{border-bottom:none;}",
+    ".tk-lb-rank{color:#9aa0aa;width:34px;display:inline-block;}",
+    ".tk-lb-pill{font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;letter-spacing:.3px;}",
+    ".tk-lb-pill.active{background:#1f6f43;color:#d8ffe9;}",
+    ".tk-lb-pill.pending{background:#3a3f4a;color:#cfd3da;}",
+    ".tk-lb-empty{padding:14px;color:#9aa0aa;font-size:13px;text-align:center;}",
+    ".tk-lb-tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid #23262e;}",
+    ".tk-lb-tab{background:none;border:none;border-bottom:2px solid transparent;color:#9aa0aa;font-size:13px;font-weight:600;padding:8px 12px;cursor:pointer;}",
+    ".tk-lb-tab.active{color:#ff9800;border-bottom-color:#ff9800;}",
+    ".tk-lb-board{border:1px solid #23262e;border-radius:9px;overflow:hidden;}",
+    ".tk-lb-brow{display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid #1c1f26;font-size:14px;}",
+    ".tk-lb-brow:last-child{border-bottom:none;}",
+    ".tk-lb-brow.top1{background:rgba(255,193,7,.08);}",
+    ".tk-lb-brow.top2{background:rgba(192,192,192,.06);}",
+    ".tk-lb-brow.top3{background:rgba(205,127,50,.07);}",
+    ".tk-lb-rankcell{width:30px;flex:0 0 auto;text-align:center;color:#9aa0aa;font-weight:700;}",
+    ".tk-lb-trophy{height:22px;width:auto;vertical-align:middle;}",
+    ".tk-lb-rankmedal{font-weight:800;}",
+    ".tk-lb-rankmedal.m1{color:#ffce3a;}.tk-lb-rankmedal.m2{color:#cfd2d6;}.tk-lb-rankmedal.m3{color:#e08a4b;}",
+    ".tk-lb-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+    ".tk-lb-uname{color:#fff;font-weight:600;}",
+    ".tk-lb-brow.top1 .tk-lb-uname{color:#ffce3a;}",
+    ".tk-lb-brow.top2 .tk-lb-uname{color:#dfe3e8;}",
+    ".tk-lb-brow.top3 .tk-lb-uname{color:#e8a36a;}",
+    ".tk-lb-uloc{color:#7f8794;font-size:12px;}",
+    ".tk-lb-total{flex:0 0 auto;color:#ff9800;font-weight:700;}",
+    ".tk-lb-pag{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:12px;}",
+    ".tk-lb-pbtn{background:#15161a;border:1px solid #2c2f37;color:#cfd3da;border-radius:7px;padding:6px 14px;cursor:pointer;font-size:13px;}",
+    ".tk-lb-pbtn:disabled{opacity:.4;cursor:default;}",
+    ".tk-lb-pinfo{color:#9aa0aa;font-size:12.5px;}",
+    ".tk-lb-foot{margin-top:12px;text-align:center;color:#7f8794;font-size:11.5px;}",
+  ].join("");
+  const tag = document.createElement("style");
+  tag.id = "tk-lb-styles";
+  tag.textContent = css;
+  document.head.appendChild(tag);
+}
+
+function renderLbContent() {
+  const content = lbContentEl;
+  if (!content) return;
+  content.textContent = "";
+  if (!lbData) {
+    const e = document.createElement("div");
+    e.className = "tk-lb-empty";
+    e.textContent = "Loading leaderboard...";
+    content.appendChild(e);
+    return;
+  }
+  if (lbTab === "global") renderLbGlobal(content);
+  else renderLbInvites(content);
+}
+
+function renderLbGlobal(content) {
+  const top = Array.isArray(lbData.top) ? lbData.top : [];
+  if (!top.length) {
+    const e = document.createElement("div");
+    e.className = "tk-lb-empty";
+    e.textContent =
+      "No invites credited yet. Be the first to invite an active member!";
+    content.appendChild(e);
+    return;
+  }
+  const pages = Math.max(1, Math.ceil(top.length / LB_PAGE_SIZE));
+  if (lbPage >= pages) lbPage = pages - 1;
+  const start = lbPage * LB_PAGE_SIZE;
+  const slice = top.slice(start, start + LB_PAGE_SIZE);
+
+  const board = document.createElement("div");
+  board.className = "tk-lb-board";
+  slice.forEach((row, idx) => {
+    const rank = start + idx + 1;
+    const r = document.createElement("div");
+    r.className = "tk-lb-brow" + (rank <= 3 ? " top" + rank : "");
+
+    const rc = document.createElement("span");
+    rc.className = "tk-lb-rankcell";
+    if (rank <= 3) {
+      const img = document.createElement("img");
+      img.src = TROPHY_SRC[rank];
+      img.alt = "#" + rank;
+      img.className = "tk-lb-trophy";
+      img.onerror = function () {
+        const s = document.createElement("span");
+        s.className = "tk-lb-rankmedal m" + rank;
+        s.textContent = String(rank);
+        if (img.parentNode) img.parentNode.replaceChild(s, img);
+      };
+      rc.appendChild(img);
+    } else {
+      rc.textContent = rank + ".";
+    }
+    r.appendChild(rc);
+
+    const name = document.createElement("span");
+    name.className = "tk-lb-name";
+    const uname = document.createElement("span");
+    uname.className = "tk-lb-uname";
+    uname.textContent = row.name || "Anonymous";
+    name.appendChild(uname);
+    if (row.location) {
+      const loc = document.createElement("span");
+      loc.className = "tk-lb-uloc";
+      loc.textContent = " / " + row.location;
+      name.appendChild(loc);
+    }
+    r.appendChild(name);
+
+    const total = document.createElement("span");
+    total.className = "tk-lb-total";
+    total.textContent = String(row.credited);
+    r.appendChild(total);
+
+    board.appendChild(r);
+  });
+  content.appendChild(board);
+
+  if (pages > 1) {
+    const pag = document.createElement("div");
+    pag.className = "tk-lb-pag";
+    const prev = document.createElement("button");
+    prev.className = "tk-lb-pbtn";
+    prev.textContent = "Prev";
+    prev.disabled = lbPage === 0;
+    prev.addEventListener("click", () => {
+      if (lbPage > 0) {
+        lbPage--;
+        renderLbBody();
+      }
+    });
+    const info = document.createElement("span");
+    info.className = "tk-lb-pinfo";
+    info.textContent = "Page " + (lbPage + 1) + " of " + pages;
+    const next = document.createElement("button");
+    next.className = "tk-lb-pbtn";
+    next.textContent = "Next";
+    next.disabled = lbPage >= pages - 1;
+    next.addEventListener("click", () => {
+      if (lbPage < pages - 1) {
+        lbPage++;
+        renderLbBody();
+      }
+    });
+    pag.appendChild(prev);
+    pag.appendChild(info);
+    pag.appendChild(next);
+    content.appendChild(pag);
+  }
+}
+
+function renderLbInvites(content) {
+  const you = lbData.you || {};
+  const code = you.code || "";
+  const link = code
+    ? location.origin + "/?ref=" + encodeURIComponent(code)
+    : "";
+  const credited = you.credited || 0;
+  const pending = Math.max(0, (you.invitedTotal || 0) - credited);
+  const modGoal = (lbData.milestones && lbData.milestones.mod) || 10;
+  const devGoal = (lbData.milestones && lbData.milestones.dev) || 100;
+  const invitees = Array.isArray(you.invitees) ? you.invitees : [];
+
+  if (link) {
+    const hero = document.createElement("div");
+    hero.className = "tk-lb-hero";
+    const h = document.createElement("h4");
+    h.textContent = "Your personal invite link";
+    hero.appendChild(h);
+    const row = document.createElement("div");
+    row.className = "tk-lb-linkrow";
+    const input = document.createElement("input");
+    input.className = "tk-lb-link";
+    input.type = "text";
+    input.readOnly = true;
+    input.value = link;
+    input.addEventListener("focus", () => input.select());
+    const copy = document.createElement("button");
+    copy.className = "tk-lb-copy";
+    copy.textContent = "Copy";
+    copy.addEventListener("click", () => {
+      StaffUI.copy(link);
+      lobbyNotify("Invite link copied!", "success");
+    });
+    row.appendChild(input);
+    row.appendChild(copy);
+    hero.appendChild(row);
+    const note = document.createElement("div");
+    note.className = "tk-lb-note";
+    note.textContent =
+      "An invite counts once your friend becomes an active member (a few days of real chatting).";
+    hero.appendChild(note);
+    content.appendChild(hero);
+  }
+
+  const chips = document.createElement("div");
+  chips.className = "tk-lb-chips";
+  const chip = (n, l) => {
+    const c = document.createElement("div");
+    c.className = "tk-lb-chip";
+    const b = document.createElement("b");
+    b.textContent = String(n);
+    const s = document.createElement("span");
+    s.textContent = l;
+    c.appendChild(b);
+    c.appendChild(s);
+    return c;
+  };
+  chips.appendChild(chip(credited, "Active invites"));
+  chips.appendChild(chip(you.rank ? "#" + you.rank : "-", "Your rank"));
+  chips.appendChild(chip(pending, "Pending"));
+  content.appendChild(chips);
+
+  const goal = (label, have, need) => {
+    const g = document.createElement("div");
+    g.className = "tk-lb-goal";
+    const gl = document.createElement("div");
+    gl.className = "gl";
+    const a = document.createElement("span");
+    a.textContent = label;
+    const b = document.createElement("span");
+    b.textContent =
+      Math.min(have, need) + " of " + need + (have >= need ? "  done" : "");
+    gl.appendChild(a);
+    gl.appendChild(b);
+    const bar = document.createElement("div");
+    bar.className = "tk-lb-bar";
+    const fill = document.createElement("i");
+    fill.style.width = Math.min(100, Math.round((have / need) * 100)) + "%";
+    bar.appendChild(fill);
+    g.appendChild(gl);
+    g.appendChild(bar);
+    return g;
+  };
+  content.appendChild(goal("Moderator application", credited, modGoal));
+  content.appendChild(goal("Developer access", credited, devGoal));
+
+  const sec = document.createElement("div");
+  sec.className = "tk-lb-sec";
+  const sh = document.createElement("h4");
+  sh.textContent = "People you invited";
+  sec.appendChild(sh);
+  const list = document.createElement("div");
+  list.className = "tk-lb-list";
+  if (!invitees.length) {
+    const e = document.createElement("div");
+    e.className = "tk-lb-empty";
+    e.textContent = "Share your link to start inviting.";
+    list.appendChild(e);
+  } else {
+    invitees.forEach((iv) => {
+      const r = document.createElement("div");
+      r.className = "tk-lb-row";
+      const n = document.createElement("span");
+      n.className = "tk-lb-name";
+      const un = document.createElement("span");
+      un.className = "tk-lb-uname";
+      un.textContent = iv.name || "Someone";
+      n.appendChild(un);
+      if (iv.location) {
+        const loc = document.createElement("span");
+        loc.className = "tk-lb-uloc";
+        loc.textContent = " / " + iv.location;
+        n.appendChild(loc);
+      }
+      const p = document.createElement("span");
+      const active = iv.status === "active";
+      p.className = "tk-lb-pill " + (active ? "active" : "pending");
+      p.textContent = active ? "Active" : "Pending";
+      r.appendChild(n);
+      r.appendChild(p);
+      list.appendChild(r);
+    });
+  }
+  sec.appendChild(list);
+  content.appendChild(sec);
+}
+const leaderboardLink = document.getElementById("leaderboardLink");
+if (leaderboardLink)
+  leaderboardLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    openLeaderboard();
+  });
+
 // Reflect the server-proven staff role in the menu link: "Staff Access" becomes
 // "Mod Dashboard" for mods and "Dev Dashboard" for devs once a key validates.
 function updateStaffLink() {
   const link = document.getElementById("staffLoginLink");
-  if (!link) return;
-  if (currentUserIsDev)
-    link.innerHTML = '<i class="fas fa-gauge-high"></i> Dev Dashboard';
-  else if (currentUserIsMod)
-    link.innerHTML = '<i class="fas fa-gauge-high"></i> Mod Dashboard';
-  else link.innerHTML = '<i class="fas fa-key"></i> Staff Access';
+  if (link) {
+    if (currentUserIsDev)
+      link.innerHTML = '<i class="fas fa-gauge-high"></i> Dev Dashboard';
+    else if (currentUserIsMod)
+      link.innerHTML = '<i class="fas fa-gauge-high"></i> Mod Dashboard';
+    else link.innerHTML = '<i class="fas fa-key"></i> Staff Access';
+  }
+  // Staff do not apply to be a mod, so hide the apply link for them.
+  const applyLink = document.getElementById("modApplyLink");
+  if (applyLink)
+    applyLink.style.display =
+      currentUserIsDev || currentUserIsMod ? "none" : "";
 }
 updateStaffLink();
 if (window.location.hash === "#staff") setTimeout(openStaffKeyEntry, 700);
@@ -1886,6 +2594,8 @@ socket.on("maintenance status", (data) => {
 (function injectLobbyStaffStyles() {
   const css = `
     .mod-lobby-badge{display:inline-block;background:#00bcd4;color:#003;font-size:8px;font-weight:bold;padding:1px 4px;border-radius:6px;margin:0 4px;letter-spacing:.5px;vertical-align:middle;}
+    .mod-lobby-badge.mod-lobby-badge-jr{background:#ab47bc;color:#fff;}
+    .invite-trophy{height:14px;width:auto;vertical-align:middle;margin:0 4px 0 0;}
     .official-badge{display:inline-block;background:#ffd700;color:#3a2c00;font-size:9px;font-weight:bold;padding:1px 6px;border-radius:8px;margin-right:6px;letter-spacing:.5px;}
     .room.spotlight-room{border:1px solid #ffd700 !important;box-shadow:0 0 0 1px rgba(255,215,0,.25) inset;}
     .lobby-dev-controls{display:flex;gap:6px;margin-top:6px;}

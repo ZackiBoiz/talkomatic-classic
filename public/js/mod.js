@@ -39,6 +39,9 @@
   let feedFilter = "all";
   let query = "";
   let focusUid = null;
+  let unreadNotifs = 0;
+  let applicationsList = [];
+  let reportsList = [];
 
   const DOM_CAP = 250; // max activity cards kept in the DOM at once
   let pendingNew = []; // live entries waiting for the next batched flush
@@ -53,11 +56,13 @@
     config: { color: "#c08bff", icon: "fa-sliders", label: "Config and roles: flags, room size, maintenance, grant or revoke" },
     signin: { color: "#57d9a3", icon: "fa-right-to-bracket", label: "Identity: a user signed in" },
     namechange: { color: "#ffb454", icon: "fa-user-pen", label: "Identity: a name changed or was reset" },
+    notification: { color: "#ff9800", icon: "fa-bell", label: "Inbox: reports, applications, and possible mod-abuse flags (full mods + devs)" },
     other: { color: "#6b7080", icon: "fa-circle-info", label: "Other: spectate, staff login" },
   };
 
   function categorize(e) {
     if (e.type === "security") return "security";
+    if (e.type === "notification") return "notification";
     if (e.type === "identity")
       return e.event === "signin" ? "signin" : "namechange";
     const a = (e.action || "").toLowerCase();
@@ -161,6 +166,21 @@
       row1.appendChild(span("chip " + (e.role === "dev" ? "dev" : "mod"), (e.role || "?").toUpperCase()));
       row1.appendChild(span("who " + (e.role === "dev" ? "dev" : "mod"), e.label || "?"));
       row1.appendChild(span("act", e.action || "?"));
+    } else if (e.type === "notification") {
+      row1.appendChild(span("chip mod", (e.kind || "notice").toUpperCase()));
+      if (e.by || e.label) row1.appendChild(span("who", e.by || e.label));
+      row1.appendChild(
+        span(
+          "act",
+          e.kind === "abuse"
+            ? "possible mod abuse"
+            : e.kind === "application"
+              ? "mod application"
+              : e.kind === "invite"
+                ? "invite milestone"
+                : "user report",
+        ),
+      );
     } else {
       row1.appendChild(uref(e.username || "?", e.userId));
       const evt = e.event === "rename" ? "changed name"
@@ -187,6 +207,16 @@
       }
       metaBit(meta, "room:", e.room);
       metaBit(meta, "by IP:", e.ip, "ip");
+    } else if (e.type === "notification") {
+      const tn = parseTarget(e.target);
+      if (tn) {
+        meta.appendChild(span("k", "target: "));
+        meta.appendChild(uref(tn.name, tn.uid));
+        meta.appendChild(document.createTextNode("   "));
+      } else {
+        metaBit(meta, "target:", e.target);
+      }
+      metaBit(meta, "room:", e.room);
     } else {
       metaBit(meta, "was:", e.prevUsername);
       metaBit(meta, "location:", e.location);
@@ -196,7 +226,8 @@
     }
     if (meta.childNodes.length) card.appendChild(meta);
 
-    const detailText = e.details || e.detail;
+    const detailText =
+      e.details || e.detail || (e.type === "notification" ? e.text : null);
     if (detailText) {
       const d = document.createElement("div");
       d.className = "detail";
@@ -528,7 +559,7 @@
       main.className = "rc-main";
       const title = span("rc-title", "");
       title.appendChild(document.createTextNode(k.label || "mod"));
-      title.appendChild(span("chip mod", "MOD"));
+      title.appendChild(span("chip mod", k.level === 1 ? "MOD L1" : "MOD L2"));
       main.appendChild(title);
       const sub = span("rc-sub mono", "key " + (k.hash ? k.hash.slice(0, 12) : "?"));
       main.appendChild(sub);
@@ -536,6 +567,37 @@
 
       const actions = document.createElement("div");
       actions.className = "rc-actions";
+
+      // Promote (L1 -> L2) / demote (L2 -> L1). Dev only; the tab is dev-gated.
+      const toLevel = k.level === 1 ? 2 : 1;
+      const levelBtn = document.createElement("button");
+      levelBtn.className = "btn sm";
+      levelBtn.appendChild(icon(toLevel === 2 ? "fa-arrow-up" : "fa-arrow-down"));
+      levelBtn.appendChild(
+        document.createTextNode(
+          toLevel === 2 ? " Promote to L2" : " Demote to L1",
+        ),
+      );
+      levelBtn.addEventListener("click", async () => {
+        if (window.StaffUI) {
+          const ok = await StaffUI.confirm({
+            title: toLevel === 2 ? "Promote to L2" : "Demote to L1",
+            message:
+              toLevel === 2
+                ? 'Give "' +
+                  (k.label || "mod") +
+                  '" full (level 2) powers, including ban and IP block?'
+                : 'Limit "' +
+                  (k.label || "mod") +
+                  '" to junior (level 1) powers?',
+            confirmText: toLevel === 2 ? "Promote" : "Demote",
+          });
+          if (!ok) return;
+        }
+        socket.emit("dev set mod level", { hash: k.hash, level: toLevel });
+      });
+      actions.appendChild(levelBtn);
+
       const revoke = document.createElement("button");
       revoke.className = "btn sm danger";
       revoke.appendChild(icon("fa-user-xmark"));
@@ -561,14 +623,268 @@
   }
   async function grantMod() {
     if (!window.StaffUI) return;
-    const label = await StaffUI.prompt({
+    const r = await StaffUI.prompt({
       title: "Grant a mod key",
       icon: '<i class="fas fa-user-shield"></i>',
-      message: "Pick a label so this key can be told apart in the log and list.",
-      fields: [{ name: "value", label: "Label (a name or handle)", type: "text", placeholder: "e.g. Zacki", required: true, maxLength: 40 }],
+      message:
+        "Pick a label so this key can be told apart in the log and list. Junior (L1) mods can kick and warn but cannot ban or IP-block - promote them later once they've proven themselves.",
+      fields: [
+        {
+          name: "value",
+          label: "Label (a name or handle)",
+          type: "text",
+          placeholder: "e.g. Zacki",
+          required: true,
+          maxLength: 40,
+        },
+        {
+          name: "level",
+          label: "Level",
+          type: "select",
+          value: "1",
+          options: [
+            { value: "1", label: "Junior mod (L1) - limited" },
+            { value: "2", label: "Full mod (L2) - all powers" },
+          ],
+        },
+      ],
       confirmText: "Generate key",
     });
-    if (label) socket.emit("dev grant mod", { label });
+    if (r && r.value)
+      socket.emit("dev grant mod", { label: r.value, level: Number(r.level) });
+  }
+
+  // ── Reports tab (full mods + devs): reported users with quick actions ──
+  function banReported(r, duration) {
+    const go = () =>
+      socket.emit("staff ip block", { targetUserId: r.targetUserId, duration });
+    if (!window.StaffUI) return go();
+    StaffUI.confirm({
+      title: "IP block",
+      message:
+        "IP-block " +
+        (r.name || "this user") +
+        " for " +
+        duration +
+        "? They are disconnected immediately.",
+      danger: true,
+      confirmText: "Block " + duration,
+    }).then((ok) => {
+      if (ok) go();
+    });
+  }
+  function renderReports() {
+    const wrap = $("reportsList");
+    if (!wrap) return;
+    wrap.textContent = "";
+    const badge = $("reportsBadge");
+    if (badge) badge.textContent = String(reportsList.length);
+    const sub = $("reportsSub");
+    if (sub)
+      sub.textContent = reportsList.length
+        ? reportsList.length +
+          " reported user" +
+          (reportsList.length === 1 ? "" : "s")
+        : "No reports yet";
+    if (!reportsList.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.appendChild(icon("fa-flag"));
+      empty.appendChild(document.createTextNode("No reports yet."));
+      wrap.appendChild(empty);
+      return;
+    }
+    const isDev = me && me.role === "dev";
+    const chipStyle =
+      "margin-left:6px;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:700;";
+    reportsList.forEach((r) => {
+      const row = document.createElement("div");
+      row.className = "rowcard";
+
+      const av = document.createElement("div");
+      av.className = "avatar";
+      av.style.background = r.distinct >= 3 ? "#ff5468" : "var(--orange)";
+      av.textContent = initialOf(r.name);
+      row.appendChild(av);
+
+      const main = document.createElement("div");
+      main.className = "rc-main";
+      const title = span("rc-title", "");
+      title.appendChild(document.createTextNode(r.name || "user"));
+      const cnt = span(
+        "chip",
+        r.distinct + (r.distinct === 1 ? " reporter" : " reporters"),
+      );
+      cnt.style.cssText = chipStyle + "background:#ff5468;color:#fff;";
+      title.appendChild(cnt);
+      const st = span(
+        "chip",
+        r.online ? (r.roomName ? "in " + r.roomName : "online") : "offline",
+      );
+      st.style.cssText =
+        chipStyle +
+        (r.online
+          ? "background:#1f6f43;color:#d8ffe9;"
+          : "background:#3a3f4a;color:#cfd3da;");
+      title.appendChild(st);
+      main.appendChild(title);
+
+      const cats = Object.entries(r.categories || {})
+        .map(([k, v]) => k + " x" + v)
+        .join(", ");
+      if (cats) main.appendChild(span("rc-sub", cats));
+      (r.reasons || []).slice(0, 3).forEach((rr) => {
+        if (rr.reason)
+          main.appendChild(
+            span("rc-sub mono", (rr.by || "?") + ": " + rr.reason),
+          );
+      });
+      row.appendChild(main);
+
+      if (r.online) {
+        const actions = document.createElement("div");
+        actions.className = "rc-actions";
+        const mkBtn = (label, danger, fn) => {
+          const b = document.createElement("button");
+          b.className = "btn sm" + (danger ? " danger" : "");
+          b.textContent = label;
+          b.addEventListener("click", fn);
+          return b;
+        };
+        actions.appendChild(
+          mkBtn("Kick", false, () =>
+            socket.emit("staff kick", { targetUserId: r.targetUserId }),
+          ),
+        );
+        actions.appendChild(mkBtn("Ban 1h", true, () => banReported(r, "1h")));
+        actions.appendChild(mkBtn("Ban 24h", true, () => banReported(r, "24h")));
+        actions.appendChild(mkBtn("Ban 7d", true, () => banReported(r, "7d")));
+        if (isDev)
+          actions.appendChild(
+            mkBtn("Ban perm", true, () => banReported(r, "permanent")),
+          );
+        row.appendChild(actions);
+      }
+      wrap.appendChild(row);
+    });
+  }
+
+  // ── Applications tab (full mods + devs) ──
+  function renderApps() {
+    const wrap = $("appsList");
+    if (!wrap) return;
+    wrap.textContent = "";
+    const pending = applicationsList.filter((a) => a.status === "pending");
+    const badge = $("appsBadge");
+    if (badge) badge.textContent = String(pending.length);
+    const sub = $("appsSub");
+    if (sub)
+      sub.textContent = pending.length
+        ? pending.length + " awaiting review"
+        : "No applications awaiting review";
+    if (applicationsList.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.appendChild(icon("fa-user-pen"));
+      empty.appendChild(document.createTextNode("No applications yet."));
+      wrap.appendChild(empty);
+      return;
+    }
+    applicationsList.forEach((a) => {
+      const row = document.createElement("div");
+      row.className = "rowcard";
+      const av = document.createElement("div");
+      av.className = "avatar";
+      av.style.background =
+        a.status === "pending" ? "var(--orange)" : "#3a3f4a";
+      av.textContent = initialOf(a.username);
+      row.appendChild(av);
+
+      const main = document.createElement("div");
+      main.className = "rc-main";
+      const title = span("rc-title", "");
+      title.appendChild(document.createTextNode(a.username || "Anonymous"));
+      const chipCls =
+        a.status === "pending"
+          ? "chip mod"
+          : a.status === "approved"
+            ? "chip dev"
+            : "chip";
+      title.appendChild(span(chipCls, (a.status || "").toUpperCase()));
+      main.appendChild(title);
+      const why = (a.answers && a.answers.why) || "(no reason given)";
+      const avail = (a.answers && a.answers.availability) || "";
+      main.appendChild(
+        span("rc-sub", why + (avail ? "  ·  avail: " + avail : "")),
+      );
+      main.appendChild(
+        span(
+          "rc-sub mono",
+          new Date(a.submittedAt).toLocaleString() +
+            (a.reviewedBy ? "  ·  by " + a.reviewedBy : "") +
+            (a.reason ? "  ·  " + a.reason : ""),
+        ),
+      );
+      row.appendChild(main);
+
+      if (a.status === "pending") {
+        const actions = document.createElement("div");
+        actions.className = "rc-actions";
+        const approve = document.createElement("button");
+        approve.className = "btn sm primary";
+        approve.appendChild(icon("fa-check"));
+        approve.appendChild(document.createTextNode(" Approve (L1)"));
+        approve.addEventListener("click", async () => {
+          if (window.StaffUI) {
+            const ok = await StaffUI.confirm({
+              title: "Approve application",
+              message:
+                "Approve " +
+                (a.username || "this user") +
+                " as a junior (L1) moderator? They get a mod key right away.",
+              confirmText: "Approve",
+            });
+            if (!ok) return;
+          }
+          socket.emit("mod application review", {
+            id: a.id,
+            decision: "approve",
+          });
+        });
+        const reject = document.createElement("button");
+        reject.className = "btn sm danger";
+        reject.appendChild(icon("fa-xmark"));
+        reject.appendChild(document.createTextNode(" Reject"));
+        reject.addEventListener("click", async () => {
+          let reason = "";
+          if (window.StaffUI) {
+            reason = await StaffUI.prompt({
+              title: "Reject application",
+              icon: '<i class="fas fa-xmark"></i>',
+              fields: [
+                {
+                  name: "value",
+                  label: "Reason (optional, kept private)",
+                  type: "text",
+                  maxLength: 300,
+                },
+              ],
+              confirmText: "Reject",
+            });
+            if (reason === null) return;
+          }
+          socket.emit("mod application review", {
+            id: a.id,
+            decision: "reject",
+            reason: reason || "",
+          });
+        });
+        actions.appendChild(approve);
+        actions.appendChild(reject);
+        row.appendChild(actions);
+      }
+      wrap.appendChild(row);
+    });
   }
 
   // ── Sessions tab (dev only): who is connected on which staff key ──
@@ -664,15 +980,37 @@
     }
     if (name === "mods") socket.emit("dev list mod keys");
     if (name === "sessions") socket.emit("dev get sessions");
+    if (name === "applications") socket.emit("mod applications list");
+    if (name === "reports") socket.emit("staff get reports");
     if (window.innerWidth <= 860) document.body.classList.add("nav-closed");
   }
+  function updateNotifBadge() {
+    const b = document.getElementById("notifCount");
+    if (!b) return;
+    b.textContent = unreadNotifs > 0 ? String(unreadNotifs) : "";
+    b.style.display = unreadNotifs > 0 ? "" : "none";
+  }
+
   function applyRoleGating() {
     const isDev = me && me.role === "dev";
+    const fullMod = isDev || (me && (me.modLevel || 2) >= 2);
     document.querySelectorAll(".nav-item[data-dev]").forEach((n) => {
       n.style.display = isDev ? "" : "none";
     });
+    // Notifications (reports + mod-abuse flags) are for full mods + devs only.
+    document.querySelectorAll("[data-min2]").forEach((n) => {
+      n.style.display = fullMod ? "" : "none";
+    });
     if (!isDev && (tab === "bans" || tab === "mods" || tab === "sessions"))
       switchTab("activity");
+    if (!fullMod && tab === "applications") switchTab("activity");
+    if (!fullMod && tab === "reports") switchTab("activity");
+    if (!fullMod && feedFilter === "notification") {
+      feedFilter = "all";
+      document
+        .querySelectorAll("#filterSeg button")
+        .forEach((b) => b.classList.toggle("active", b.dataset.f === "all"));
+    }
   }
 
   // ── Socket wiring ──
@@ -700,12 +1038,31 @@
     renderRoster(data && data.roster);
     renderLegend();
     renderActivity();
+
+    // Populate the left-panel counts immediately, not only when a tab is opened.
+    const fullMod = me && (me.role === "dev" || (me.modLevel || 0) >= 2);
+    if (me && me.role === "dev") {
+      socket.emit("dev list blocks");
+      socket.emit("dev list mod keys");
+      socket.emit("dev get sessions");
+    }
+    if (fullMod) {
+      socket.emit("mod applications list");
+      socket.emit("staff get reports");
+    }
   });
 
   socket.on("audit entry", (e) => {
     if (!e) return;
     entries.push(e);
     if (entries.length > 5000) entries = entries.slice(-3000);
+    if (
+      e.type === "notification" &&
+      !(tab === "activity" && feedFilter === "notification")
+    ) {
+      unreadNotifs++;
+      updateNotifBadge();
+    }
     if (e.type === "comment" && e.refId) {
       if (!commentsByRef.has(e.refId)) commentsByRef.set(e.refId, []);
       commentsByRef.get(e.refId).push(e);
@@ -731,6 +1088,16 @@
     renderMods();
   });
 
+  socket.on("mod applications", (list) => {
+    applicationsList = Array.isArray(list) ? list : [];
+    renderApps();
+  });
+
+  socket.on("staff reports", (list) => {
+    reportsList = Array.isArray(list) ? list : [];
+    renderReports();
+  });
+
   socket.on("dev sessions", (data) => {
     sessionData = data || { sessions: [], history: [] };
     renderSessions();
@@ -740,7 +1107,12 @@
     if (!d || !d.key || !window.StaffUI) return;
     const w = document.createElement("div");
     const p1 = document.createElement("p");
-    p1.textContent = 'New mod key for "' + (d.label || "mod") + '". Copy it now: it is shown once and never stored.';
+    p1.textContent =
+      "New " +
+      (d.level === 1 ? "junior (L1)" : "full (L2)") +
+      ' mod key for "' +
+      (d.label || "mod") +
+      '". Copy it now: it is shown once and never stored.';
     const code = document.createElement("div");
     code.className = "mono";
     code.style.cssText = "background:#000;border:1px solid #333;padding:10px;margin:10px 0;word-break:break-all;border-radius:6px;color:#ff9800;";
@@ -817,6 +1189,14 @@
       socket.emit("dev get sessions"),
     );
   $("grantMod").addEventListener("click", grantMod);
+  $("appsRefresh") &&
+    $("appsRefresh").addEventListener("click", () =>
+      socket.emit("mod applications list"),
+    );
+  $("reportsRefresh") &&
+    $("reportsRefresh").addEventListener("click", () =>
+      socket.emit("staff get reports"),
+    );
 
   let searchDebounce = null;
   searchEl.addEventListener("input", () => {
@@ -831,6 +1211,10 @@
       document.querySelectorAll("#filterSeg button").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       feedFilter = btn.dataset.f;
+      if (feedFilter === "notification") {
+        unreadNotifs = 0;
+        updateNotifBadge();
+      }
       renderActivity();
     });
   });

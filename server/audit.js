@@ -3,8 +3,8 @@
 // (mod.html), keeps an in-memory ring buffer for fast reads, persists to
 // audit-log.jsonl, and live-broadcasts to subscribed staff sockets:
 //
-//   type "action"   — a privileged staff action (who, what, target, room, IP)
-//   type "identity" — a user signing in or changing their username (IP +
+//   type "action"   - a privileged staff action (who, what, target, room, IP)
+//   type "identity" - a user signing in or changing their username (IP +
 //                     old/new name) so any name can always be traced back
 //
 // Staff actions are ALSO mirrored to the human-readable modlog.txt (the file
@@ -21,7 +21,7 @@ const MAX_ENTRIES = 2000;
 
 let entries = []; // ring buffer, oldest first
 let seq = 0;
-// userId -> { username, location } — last known identity, to detect changes
+// userId -> { username, location } - last known identity, to detect changes
 const lastIdentity = new Map();
 
 function io() {
@@ -41,9 +41,16 @@ function broadcast(entry) {
   const masked = redactForMod(entry);
   for (const [, s] of io().sockets.sockets) {
     if (!s.auditSub) continue;
-    if (s.isDev) s.emit("audit entry", entry);
+    if (s.isDev) {
+      s.emit("audit entry", entry);
+      continue;
+    }
+    if (!s.isMod) continue;
     // Key security alerts concern dev/mod keys and IPs, so they are dev-only.
-    else if (s.isMod && !entry.devOnly) s.emit("audit entry", masked);
+    if (entry.devOnly) continue;
+    // Some entries (mod-abuse flags, reports) are for full (level 2) mods +.
+    if (entry.minLevel && (s.modLevel || 2) < entry.minLevel) continue;
+    s.emit("audit entry", masked);
   }
 }
 
@@ -114,7 +121,7 @@ function recordIdentity({ userId, username, location, ip }) {
   });
 }
 
-// Staff forced a user's name to Anonymous — log it and reset the baseline.
+// Staff forced a user's name to Anonymous - log it and reset the baseline.
 function recordForcedRename({ userId, from, ip, by, room }) {
   const prevLoc = lastIdentity.get(userId)?.location || null;
   lastIdentity.set(userId, { username: "Anonymous", location: prevLoc });
@@ -148,6 +155,41 @@ function recordKeyAlert({ role, label, ip, kind, detail }) {
   });
 }
 
+// A staff notification: a user report, or a possible mod-abuse flag. Shown in
+// the dashboard feed AND pushed as a live toast to qualifying staff so it isn't
+// missed. Default visibility is full (level 2) mods + devs; never junior mods.
+function recordNotification({ kind, label, role, text, target, room, by, minLevel }) {
+  const lvl = minLevel === 1 ? 1 : 2;
+  const entry = push({
+    ts: Date.now(),
+    type: "notification",
+    minLevel: lvl,
+    kind: kind || "notice",
+    role: role || null,
+    label: label || null,
+    text: text || null,
+    target: target || null,
+    room: room || null,
+    by: by || null,
+  });
+  notifyStaffToast(text || "New staff notification", lvl);
+  return entry;
+}
+
+// Live toast to qualifying staff regardless of whether the dashboard is open,
+// so reports and abuse flags surface even to staff sitting in a room or lobby.
+function notifyStaffToast(text, minLevel) {
+  if (!io()) return;
+  for (const [, s] of io().sockets.sockets) {
+    if (s.isDev) {
+      s.emit("staff notice", { text });
+      continue;
+    }
+    if (s.isMod && (s.modLevel || 2) >= (minLevel || 2))
+      s.emit("staff notice", { text });
+  }
+}
+
 // A staff comment attached to an existing log entry (discussion / "why?").
 function recordComment({ entryId, role, label, text, ip }) {
   if (!entryId || !text) return;
@@ -162,11 +204,15 @@ function recordComment({ entryId, role, label, text, ip }) {
   });
 }
 
-function recent(limit = 500, includeIp = true) {
+function recent(limit = 500, includeIp = true, modLevel = 2) {
   const n = Math.min(Math.max(1, limit), MAX_ENTRIES);
   const slice = entries.slice(-n);
-  // Devs see everything; mods get IP-redacted entries with dev-only ones removed.
-  return includeIp ? slice : slice.filter((e) => !e.devOnly).map(redactForMod);
+  // Devs see everything; mods get IP-redacted entries with dev-only ones and
+  // anything above their level removed.
+  if (includeIp) return slice;
+  return slice
+    .filter((e) => !e.devOnly && (!e.minLevel || modLevel >= e.minLevel))
+    .map(redactForMod);
 }
 
 function setAuditSub(socket, on) {
@@ -208,6 +254,7 @@ module.exports = {
   recordIdentity,
   recordForcedRename,
   recordKeyAlert,
+  recordNotification,
   recordComment,
   recent,
   setAuditSub,

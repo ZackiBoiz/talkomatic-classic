@@ -52,6 +52,30 @@ process.on("uncaughtException", (error) => {
   console.error("=== UNCAUGHT EXCEPTION ===", error.message, error.stack);
 });
 
+// Flush the in-memory stores to disk on a clean shutdown so recent invite
+// credits, names, and applications survive a restart or redeploy.
+function gracefulFlush() {
+  try {
+    require("./server/invites").flushSync();
+  } catch (e) {}
+  try {
+    require("./server/identity").flushSync();
+  } catch (e) {}
+  try {
+    require("./server/applications").flushSync();
+  } catch (e) {}
+}
+let shuttingDown = false;
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    gracefulFlush();
+    process.exit(0);
+  });
+}
+process.on("beforeExit", gracefulFlush);
+
 // ── Express & HTTP ──────────────────────────────────────────────────────────
 
 const app = express();
@@ -163,7 +187,7 @@ app.use(
 
 app.use((req, res, next) => {
   // TalkoBrowser is a self-contained page that needs inline JS,
-  // external icon images, and iframes — exempt it from the strict CSP
+  // external icon images, and iframes - exempt it from the strict CSP
   if (req.path === "/browser.html") return next();
   return helmetMiddleware(req, res, next);
 });
@@ -306,6 +330,7 @@ io.use((socket, next) => {
       if (mk) {
         socket.isMod = true;
         socket.modKeyHash = mk.hash;
+        socket.modLevel = mk.level || 2;
         socket.staffLabel = mk.label;
         // Mods can hide their badge with the same persisted toggle as devs.
         socket.isHidden = !!socket.handshake?.session?.isDevHidden;
@@ -318,6 +343,12 @@ io.use((socket, next) => {
         console.log(`[MOD] Mod mode activated (${mk.label}) for IP:${clientIp}`);
       }
     }
+
+    // Durable per-browser device id (active-vs-new + invite credit). Not a
+    // secret and never trusted for anything privileged - purely an activity key.
+    const deviceId = socket.handshake.auth.deviceId;
+    if (typeof deviceId === "string" && /^[a-f0-9-]{8,64}$/i.test(deviceId))
+      socket.deviceId = deviceId.toLowerCase();
 
     if (CONFIG.FEATURES.ENABLE_STRICT_ANTIBOT && !browser.isBrowser) {
       if (CONFIG.FEATURES.ENABLE_BOT_TOKENS) {
@@ -674,7 +705,7 @@ async function start() {
   Rooms: ${stats.totalRooms}/${stats.currentLimit} | Users: ${stats.totalUsers}
   Antibot: ${CONFIG.FEATURES.ENABLE_STRICT_ANTIBOT ? "ON" : "OFF"} | Bot Tokens: ${CONFIG.FEATURES.ENABLE_BOT_TOKENS ? "ON" : "OFF"}
   Dev Mode: ${CONFIG.DEV.KEY_HASH ? "CONFIGURED" : "NOT SET"}
-  Session Secret: ${SESSION_SECRET ? "SET (persistent)" : "MISSING (ephemeral — sessions reset on restart)"}
+  Session Secret: ${SESSION_SECRET ? "SET (persistent)" : "MISSING (ephemeral - sessions reset on restart)"}
 ══════════════════════════════════════════════════════`);
   });
 }
