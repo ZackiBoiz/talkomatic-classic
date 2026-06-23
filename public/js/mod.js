@@ -42,6 +42,8 @@
   let unreadNotifs = 0;
   let applicationsList = [];
   let reportsList = [];
+  let invitesList = []; // flagged inviters (Invites tab)
+  const inviteDetails = new Map(); // deviceId -> last forensic detail
 
   const DOM_CAP = 250; // max activity cards kept in the DOM at once
   let pendingNew = []; // live entries waiting for the next batched flush
@@ -1064,6 +1066,224 @@
     });
   }
 
+  // ── Invites tab (full mods + devs): flag and clean farmed invites ──
+  function verdictMeta(level) {
+    if (level === "likely_farmed")
+      return { cls: "farmed", label: "Likely farmed", icon: "fa-robot" };
+    if (level === "suspicious")
+      return {
+        cls: "suspicious",
+        label: "Suspicious",
+        icon: "fa-circle-question",
+      };
+    return { cls: "clean", label: "Looks clean", icon: "fa-circle-check" };
+  }
+
+  // Confirm, then ask the server to soft-delete a flagged cluster (or all
+  // flagged invites) for one inviter. The server re-checks the flag and logs it.
+  async function confirmPurge(it, cohort, count) {
+    if (!window.StaffUI) return;
+    const go = await StaffUI.confirm({
+      title: "Remove farmed invites",
+      danger: true,
+      confirmText: "Remove " + count,
+      message:
+        "Remove " +
+        count +
+        " pending invite" +
+        (count === 1 ? "" : "s") +
+        " from " +
+        (it.name || "this inviter") +
+        "? Active invites are never touched. This is logged, and a developer can undo it.",
+    });
+    if (!go) return;
+    socket.emit("staff purge invites", { deviceId: it.deviceId, cohort });
+  }
+
+  // The expanded forensic detail for one inviter: a cadence + conversion
+  // summary, each same-address cluster with its own Remove button, and (for
+  // devs) an undo of the last removal.
+  function buildInviteDetail(it, d, isDev) {
+    const box = document.createElement("div");
+    box.className = "inv-detail";
+
+    const sum = span("sumline");
+    const parts = [];
+    if (d.medianGapMs != null)
+      parts.push("~" + (d.medianGapMs / 1000).toFixed(1) + "s between invites");
+    parts.push((d.activePct || 0) + "% became active");
+    parts.push((d.namedPct || 0) + "% ever named");
+    sum.textContent = parts.join("   ·   ");
+    box.appendChild(sum);
+
+    if (!d.cohorts || !d.cohorts.length) {
+      box.appendChild(
+        span(
+          "rc-discard",
+          "No same-address cluster large enough to remove as a group.",
+        ),
+      );
+    } else {
+      const head = document.createElement("div");
+      head.className = "report-log-head";
+      head.style.padding = "0 0 6px";
+      head.textContent = "Same-address clusters";
+      box.appendChild(head);
+      d.cohorts.forEach((c) => {
+        const row = document.createElement("div");
+        row.className = "cohort-row";
+        const info = span("cinfo");
+        const b = document.createElement("b");
+        b.textContent = c.count + " invite" + (c.count === 1 ? "" : "s");
+        info.appendChild(b);
+        info.appendChild(document.createTextNode(" from one address"));
+        if (isDev && c.ip) {
+          info.appendChild(document.createTextNode(" "));
+          info.appendChild(span("ip", c.ip));
+        }
+        row.appendChild(info);
+        const rm = document.createElement("button");
+        rm.className = "btn sm danger";
+        rm.appendChild(icon("fa-trash"));
+        rm.appendChild(document.createTextNode(" Remove " + c.count));
+        rm.addEventListener("click", () => confirmPurge(it, c.index, c.count));
+        row.appendChild(rm);
+        box.appendChild(row);
+      });
+    }
+
+    if (isDev && d.lastBatch) {
+      const undo = document.createElement("button");
+      undo.className = "btn sm";
+      undo.style.marginTop = "10px";
+      undo.appendChild(icon("fa-rotate-left"));
+      undo.appendChild(document.createTextNode(" Undo last removal"));
+      undo.addEventListener("click", () =>
+        socket.emit("staff undo invite purge", {
+          deviceId: it.deviceId,
+          batch: d.lastBatch,
+        }),
+      );
+      box.appendChild(undo);
+    }
+    return box;
+  }
+
+  function renderInvites() {
+    const wrap = $("invitesList");
+    if (!wrap) return;
+    wrap.textContent = "";
+    const badge = $("invitesBadge");
+    if (badge) badge.textContent = String(invitesList.length);
+    const sub = $("invitesSub");
+    if (sub)
+      sub.textContent = invitesList.length
+        ? invitesList.length +
+          " flagged inviter" +
+          (invitesList.length === 1 ? "" : "s")
+        : "No flagged inviters";
+    if (!invitesList.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.appendChild(icon("fa-trophy"));
+      empty.appendChild(
+        document.createTextNode(
+          "No farmed invites detected. The board is clean.",
+        ),
+      );
+      wrap.appendChild(empty);
+      return;
+    }
+    const isDev = me && me.role === "dev";
+    invitesList.forEach((it) => {
+      const vm = verdictMeta(it.verdict && it.verdict.level);
+      const card = document.createElement("div");
+      card.className = "report-card" + (vm.cls === "farmed" ? " hot" : "");
+
+      const head = document.createElement("div");
+      head.className = "rc-head";
+      const av = document.createElement("div");
+      av.className = "avatar";
+      av.style.background =
+        vm.cls === "farmed" ? "var(--red)" : "var(--orange)";
+      av.textContent = initialOf(it.name);
+      head.appendChild(av);
+      const idCol = document.createElement("div");
+      idCol.className = "rc-id";
+      idCol.appendChild(span("rc-kicker", "Inviter"));
+      idCol.appendChild(span("nm", it.name || "Anonymous"));
+      const meta = document.createElement("div");
+      meta.className = "rc-meta";
+      const v = span("verdict " + vm.cls);
+      v.appendChild(icon(vm.icon));
+      v.appendChild(document.createTextNode(" " + vm.label));
+      meta.appendChild(v);
+      if (it.location) meta.appendChild(span(null, it.location));
+      idCol.appendChild(meta);
+      head.appendChild(idCol);
+      card.appendChild(head);
+
+      const stats = document.createElement("div");
+      stats.className = "inv-stats";
+      const chip = (label, val) => {
+        const s = span("st");
+        s.appendChild(document.createTextNode(label + " "));
+        const b = document.createElement("b");
+        b.textContent = String(val);
+        s.appendChild(b);
+        return s;
+      };
+      stats.appendChild(chip("pending", it.pending));
+      stats.appendChild(chip("active", it.active));
+      stats.appendChild(chip("distinct IPs", it.distinctIps));
+      stats.appendChild(chip("top address", (it.topIpPct || 0) + "%"));
+      stats.appendChild(chip("named", (it.namedPct || 0) + "%"));
+      card.appendChild(stats);
+
+      if (it.verdict && it.verdict.reasons && it.verdict.reasons.length) {
+        const ul = document.createElement("ul");
+        ul.className = "inv-reasons";
+        it.verdict.reasons.forEach((r) => {
+          const li = document.createElement("li");
+          li.textContent = r;
+          ul.appendChild(li);
+        });
+        card.appendChild(ul);
+      }
+
+      const detail = inviteDetails.get(it.deviceId);
+      const foot = document.createElement("div");
+      foot.className = "rc-foot";
+      if (!detail) {
+        const investigate = document.createElement("button");
+        investigate.className = "btn sm";
+        investigate.appendChild(icon("fa-magnifying-glass"));
+        investigate.appendChild(document.createTextNode(" Investigate"));
+        investigate.addEventListener("click", () =>
+          socket.emit("staff get invite report", { deviceId: it.deviceId }),
+        );
+        foot.appendChild(investigate);
+      }
+      if (it.pending > 0) {
+        const purgeAll = document.createElement("button");
+        purgeAll.className = "btn sm danger";
+        purgeAll.appendChild(icon("fa-broom"));
+        purgeAll.appendChild(
+          document.createTextNode(" Remove all flagged (" + it.pending + ")"),
+        );
+        purgeAll.addEventListener("click", () =>
+          confirmPurge(it, "all", it.pending),
+        );
+        foot.appendChild(purgeAll);
+      }
+      card.appendChild(foot);
+
+      if (detail) card.appendChild(buildInviteDetail(it, detail, isDev));
+
+      wrap.appendChild(card);
+    });
+  }
+
   // ── Applications tab (full mods + devs) ──
   function renderApps() {
     const wrap = $("appsList");
@@ -1306,6 +1526,7 @@
     if (name === "sessions") socket.emit("dev get sessions");
     if (name === "applications") socket.emit("mod applications list");
     if (name === "reports") socket.emit("staff get reports");
+    if (name === "invites") socket.emit("staff get invite report");
     if (window.innerWidth <= 860) document.body.classList.add("nav-closed");
   }
   function updateNotifBadge() {
@@ -1329,6 +1550,7 @@
       switchTab("activity");
     if (!fullMod && tab === "applications") switchTab("activity");
     if (!fullMod && tab === "reports") switchTab("activity");
+    if (!fullMod && tab === "invites") switchTab("activity");
     if (!fullMod && feedFilter === "notification") {
       feedFilter = "all";
       document
@@ -1378,6 +1600,7 @@
     if (fullMod) {
       socket.emit("mod applications list");
       socket.emit("staff get reports");
+      socket.emit("staff get invite report");
     }
   });
 
@@ -1425,6 +1648,31 @@
   socket.on("staff reports", (list) => {
     reportsList = Array.isArray(list) ? list : [];
     renderReports();
+  });
+
+  socket.on("staff invite report", (list) => {
+    invitesList = Array.isArray(list) ? list : [];
+    renderInvites();
+  });
+
+  socket.on("staff invite detail", (d) => {
+    if (!d || !d.deviceId) return;
+    inviteDetails.set(d.deviceId, d);
+    // Reflect the post-action state on the list card (counts + verdict change
+    // after a purge or undo) without waiting for a full list refresh.
+    const idx = invitesList.findIndex((x) => x.deviceId === d.deviceId);
+    if (idx >= 0) {
+      const c = d.counts || {};
+      invitesList[idx] = Object.assign({}, invitesList[idx], {
+        pending: c.pending != null ? c.pending : invitesList[idx].pending,
+        active: c.active != null ? c.active : invitesList[idx].active,
+        distinctIps: d.distinctIps,
+        topIpPct: d.topIpPct,
+        namedPct: d.namedPct,
+        verdict: d.verdict || invitesList[idx].verdict,
+      });
+    }
+    renderInvites();
   });
 
   socket.on("dev sessions", (data) => {
@@ -1564,6 +1812,11 @@
     $("reportsRefresh").addEventListener("click", () =>
       socket.emit("staff get reports"),
     );
+  $("invitesRefresh") &&
+    $("invitesRefresh").addEventListener("click", () => {
+      inviteDetails.clear();
+      socket.emit("staff get invite report");
+    });
 
   let searchDebounce = null;
   searchEl.addEventListener("input", () => {

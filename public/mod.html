@@ -941,6 +941,92 @@
         border-color: var(--red);
       }
 
+      /* ── Invite integrity ── */
+      .verdict {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11.5px;
+        font-weight: bold;
+        padding: 3px 10px;
+        border-radius: 20px;
+        white-space: nowrap;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+      }
+      .verdict.farmed {
+        background: rgba(255, 84, 104, 0.16);
+        color: var(--red);
+      }
+      .verdict.suspicious {
+        background: rgba(255, 180, 84, 0.16);
+        color: var(--amber);
+      }
+      .verdict.clean {
+        background: rgba(87, 217, 163, 0.15);
+        color: var(--green);
+      }
+      .inv-stats {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        padding: 0 18px 14px;
+        font-size: 12.5px;
+        color: var(--dim);
+      }
+      .inv-stats .st {
+        background: var(--panel2);
+        border: 1px solid var(--line-soft);
+        border-radius: 7px;
+        padding: 4px 10px;
+      }
+      .inv-stats .st b {
+        color: var(--txt);
+      }
+      .inv-reasons {
+        margin: 0;
+        padding: 0 18px 14px 38px;
+      }
+      .inv-reasons li {
+        color: var(--dim);
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      .inv-detail {
+        border-top: 1px solid var(--line);
+        padding: 14px 18px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .inv-detail .sumline {
+        font-size: 12.5px;
+        color: var(--dim2);
+        margin-bottom: 10px;
+      }
+      .cohort-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--line-soft);
+      }
+      .cohort-row:last-child {
+        border-bottom: none;
+      }
+      .cohort-row .cinfo {
+        flex: 1;
+        min-width: 0;
+        font-size: 13px;
+        color: var(--dim);
+      }
+      .cohort-row .cinfo b {
+        color: var(--txt);
+      }
+      .cohort-row .cinfo .ip {
+        color: var(--amber);
+      }
+
       /* ── Guide ── */
       .guide-intro {
         font-size: 15px;
@@ -1154,6 +1240,10 @@
             <i class="fas fa-flag"></i> Reports
             <span class="ni-badge" id="reportsBadge">0</span>
           </button>
+          <button class="nav-item" data-tab="invites" data-min2>
+            <i class="fas fa-trophy"></i> Invites
+            <span class="ni-badge" id="invitesBadge">0</span>
+          </button>
           <button class="nav-item" data-tab="applications" data-min2>
             <i class="fas fa-user-pen"></i> Applications
             <span class="ni-badge" id="appsBadge">0</span>
@@ -1238,6 +1328,32 @@
             </span>
           </p>
           <div id="reportsList" class="cards"></div>
+        </section>
+
+        <!-- Invites -->
+        <section id="tab-invites" class="panel">
+          <div class="panel-head">
+            <h1><i class="fas fa-trophy"></i> Invite integrity</h1>
+            <span class="sub" id="invitesSub">Flagged inviters</span>
+            <div class="ph-actions">
+              <button id="invitesRefresh" class="btn sm">
+                <i class="fas fa-arrows-rotate"></i> Refresh
+              </button>
+            </div>
+          </div>
+          <p class="reports-note">
+            <i class="fas fa-circle-info"></i>
+            <span>
+              A pending invite only counts after a real-visitor signal (a chosen
+              username plus a real session) and expires on its own after a week,
+              so a drive-by invite-link bot earns nothing. Listed here are
+              inviters whose pending invites still look automated. Investigate to
+              see the pattern, then remove a flagged cluster. Active invites are
+              never touched, every removal is logged, and a developer can undo
+              it, so a clean inviter is never hurt by a mistake.
+            </span>
+          </p>
+          <div id="invitesList" class="cards"></div>
         </section>
 
         <!-- Applications -->
@@ -1489,6 +1605,6 @@
 
     <script src="/socket.io/socket.io.js"></script>
     <script src="js/staff-ui.js?v=1.5.0"></script>
-    <script src="js/mod.js?v=3.4.3"></script>
+    <script src="js/mod.js?v=3.5.0"></script>
   </body>
 </html>

@@ -2396,8 +2396,10 @@ function renderLbGlobal(content) {
     const rank = start + idx + 1;
     const active = row.active || 0;
     const pending = row.pending || 0;
-    // The top three on the board always get gold, silver, and bronze.
-    const medal = rank <= 3;
+    // Top three get gold, silver, and bronze - but a trophy is earned by
+    // ACTIVE invites, so it can never be won on pending (farmable) numbers
+    // alone. Rows without an active invite show their plain rank number.
+    const medal = rank <= 3 && active > 0;
     const r = document.createElement("div");
     r.className =
       "tk-lb-brow" + (medal ? " top" + rank : "") + (row.mine ? " mine" : "");
