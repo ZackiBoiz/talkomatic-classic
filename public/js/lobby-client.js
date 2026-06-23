@@ -2599,10 +2599,10 @@ socket.on("maintenance status", (data) => {
     .official-badge{display:inline-block;background:#ffd700;color:#3a2c00;font-size:9px;font-weight:bold;padding:1px 6px;border-radius:8px;margin-right:6px;letter-spacing:.5px;}
     .room.spotlight-room{border:1px solid #ffd700 !important;box-shadow:0 0 0 1px rgba(255,215,0,.25) inset;}
     .lobby-dev-controls{display:flex;gap:6px;margin-top:6px;}
-    .lobby-dev-btn{flex:1;background:#15161a;color:#ff9800;border:1px solid #2c2f37;border-radius:6px;padding:5px 6px;font-size:11px;cursor:pointer;font-weight:600;}
-    .lobby-dev-btn:hover{border-color:#ff9800;background:#1d1a12;}
-    #devPanelButton{position:fixed;bottom:16px;right:16px;z-index:99990;background: #030303;color: #ffffff;border:1px solid #ff9800;border-radius:8px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.5);}
-    #devPanelButton:hover{background: #252525;}
+    .lobby-dev-btn{flex:1;background:#000;color:#ff9800;border:1px solid #616161;border-radius:4px;padding:6px 7px;font-size:11px;cursor:pointer;font-weight:bold;font-family:inherit;transition:all .2s ease;}
+    .lobby-dev-btn:hover{border-color:#ff9800;background:#ff9800;color:#000;}
+    #devPanelButton{position:fixed;bottom:16px;right:16px;z-index:99990;background:#000;color:#ffffff;border:1px solid #ff9800;border-radius:4px;padding:10px 16px;font-size:13px;font-weight:bold;font-family:inherit;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.5);transition:all .2s ease;}
+    #devPanelButton:hover{background:#ff9800;color:#000;}
     #lobbyTickerBar{position:fixed;top:0;left:0;right:0;z-index:99980;background:#ff9800;color:#1a1206;text-align:center;font-size:13px;font-weight:700;padding:7px 16px;letter-spacing:.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-sizing:border-box;}
     #lobbyMaintenanceBar{position:fixed;bottom:0;left:0;right:0;z-index:99980;background:#5c2d91;color:#fff;text-align:center;font-size:13px;font-weight:700;padding:7px 16px;box-sizing:border-box;}
   `;

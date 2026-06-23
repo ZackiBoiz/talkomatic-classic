@@ -3766,8 +3766,8 @@ window.addEventListener("hashchange", () => {
     .staff-action-button:hover{opacity:1;}
     .report-button{background:none;border:none;cursor:pointer;font-size:12px;margin-left:4px;opacity:.5;color:inherit;}
     .report-button:hover{opacity:1;}
-    .staff-nav-btn{display:flex;align-items:center;gap:6px;margin-right:8px;padding:10px;border:1px solid #ff9800;border-radius:6px;color:#ff9800;cursor:pointer;font-size:12px;font-weight:600;}
-    .staff-nav-btn:hover{background: #ffffff;}
+    .staff-nav-btn{display:flex;align-items:center;gap:6px;margin-right:8px;padding:10px 12px;border:1px solid #ff9800;border-radius:4px;background:#000;color:#ff9800;cursor:pointer;font-size:12px;font-weight:bold;font-family:inherit;transition:all .2s ease;}
+    .staff-nav-btn:hover{background:#ff9800;color:#000;}
     #roomStaffFlags{display:flex;gap:6px;align-items:center;margin-left:8px;}
     .room-flag{font-size:10px;font-weight:bold;padding:2px 6px;border-radius:10px;}
     .room-flag.f-official{background:#ffd700;color:#3a2c00;}
