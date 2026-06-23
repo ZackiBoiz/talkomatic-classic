@@ -43,6 +43,8 @@
   let applicationsList = [];
   let reportsList = [];
   let invitesList = []; // flagged inviters (Invites tab)
+  let invitesPage = 0;
+  const INV_PAGE = 12;
   const inviteDetails = new Map(); // deviceId -> last forensic detail
 
   const DOM_CAP = 250; // max activity cards kept in the DOM at once
@@ -363,10 +365,13 @@
     thread.appendChild(row);
   }
 
-  // Full rebuild of the feed, capped to the most recent DOM_CAP matches.
+  // Full rebuild of the feed, capped to the most recent DOM_CAP matches and
+  // rendered in animation-frame chunks so a long feed never blocks the page.
+  let activityToken = 0;
   function renderActivity() {
     pendingNew = [];
     listEl.textContent = "";
+    const token = ++activityToken;
     const matches = entries.filter((e) => e.type !== "comment" && passes(e));
     if (matches.length === 0) {
       feedNote.classList.add("hidden");
@@ -378,9 +383,15 @@
       return;
     }
     const shown = matches.slice(-DOM_CAP);
-    for (let i = shown.length - 1; i >= 0; i--)
-      listEl.appendChild(buildCard(shown[i]));
     updateFeedNote(matches.length);
+    // Newest first; live inserts still arrive at the top via flushPending.
+    let i = shown.length - 1;
+    (function chunk() {
+      if (token !== activityToken) return; // a newer render superseded this one
+      for (let n = 0; i >= 0 && n < 40; i--, n++)
+        listEl.appendChild(buildCard(shown[i]));
+      if (i >= 0) requestAnimationFrame(chunk);
+    })();
   }
 
   function updateFeedNote(total) {
@@ -902,6 +913,34 @@
     });
   }
 
+  // Warn a reported user (works whether they are online or offline; the server
+  // delivers now or queues it for their next connect).
+  async function warnReported(r) {
+    if (!window.StaffUI)
+      return socket.emit("staff warn user", { targetUserId: r.targetUserId });
+    const msg = await StaffUI.prompt({
+      title: "Warn " + (r.name || "user"),
+      icon: '<i class="fas fa-triangle-exclamation"></i>',
+      subtitle: r.online
+        ? "They will see it right away"
+        : "Saved until they next come online",
+      confirmText: "Send warning",
+      fields: [
+        {
+          name: "value",
+          label: "Message (optional)",
+          placeholder: "Please follow the Talkomatic rules.",
+          maxLength: 1000,
+        },
+      ],
+    });
+    if (msg == null) return; // cancelled
+    socket.emit("staff warn user", {
+      targetUserId: r.targetUserId,
+      message: String(msg).trim(),
+    });
+  }
+
   function renderReports() {
     const wrap = $("reportsList");
     if (!wrap) return;
@@ -1039,6 +1078,9 @@
         b.addEventListener("click", fn);
         return b;
       };
+      foot.appendChild(
+        mkBtn("Warn", "fa-triangle-exclamation", false, () => warnReported(r)),
+      );
       if (r.online)
         foot.appendChild(
           mkBtn("Kick", "fa-door-open", false, () =>
@@ -1107,7 +1149,8 @@
     const box = document.createElement("div");
     box.className = "inv-detail";
 
-    const sum = span("sumline");
+    const sum = document.createElement("div");
+    sum.className = "sumline";
     const parts = [];
     if (d.medianGapMs != null)
       parts.push("~" + (d.medianGapMs / 1000).toFixed(1) + "s between invites");
@@ -1117,12 +1160,11 @@
     box.appendChild(sum);
 
     if (!d.cohorts || !d.cohorts.length) {
-      box.appendChild(
-        span(
-          "rc-discard",
-          "No same-address cluster large enough to remove as a group.",
-        ),
-      );
+      const none = document.createElement("div");
+      none.className = "inv-none";
+      none.textContent =
+        "No same-address cluster large enough to remove as a group.";
+      box.appendChild(none);
     } else {
       const head = document.createElement("div");
       head.className = "report-log-head";
@@ -1195,7 +1237,11 @@
       return;
     }
     const isDev = me && me.role === "dev";
-    invitesList.forEach((it) => {
+    const pages = Math.max(1, Math.ceil(invitesList.length / INV_PAGE));
+    if (invitesPage >= pages) invitesPage = pages - 1;
+    if (invitesPage < 0) invitesPage = 0;
+    const start = invitesPage * INV_PAGE;
+    invitesList.slice(start, start + INV_PAGE).forEach((it) => {
       const vm = verdictMeta(it.verdict && it.verdict.level);
       const card = document.createElement("div");
       card.className = "report-card" + (vm.cls === "farmed" ? " hot" : "");
@@ -1282,6 +1328,35 @@
 
       wrap.appendChild(card);
     });
+
+    if (pages > 1) {
+      const pager = document.createElement("div");
+      pager.className = "inv-pager";
+      const nav = (label, faIcon, atEnd, disabled, delta) => {
+        const b = document.createElement("button");
+        b.className = "btn sm";
+        b.disabled = disabled;
+        if (!atEnd) b.appendChild(icon(faIcon));
+        b.appendChild(document.createTextNode(label));
+        if (atEnd) b.appendChild(icon(faIcon));
+        if (!disabled)
+          b.addEventListener("click", () => {
+            invitesPage += delta;
+            renderInvites();
+          });
+        return b;
+      };
+      pager.appendChild(
+        nav(" Prev", "fa-chevron-left", false, invitesPage === 0, -1),
+      );
+      pager.appendChild(
+        span(null, "Page " + (invitesPage + 1) + " of " + pages),
+      );
+      pager.appendChild(
+        nav("Next ", "fa-chevron-right", true, invitesPage >= pages - 1, 1),
+      );
+      wrap.appendChild(pager);
+    }
   }
 
   // ── Applications tab (full mods + devs) ──
@@ -1652,6 +1727,7 @@
 
   socket.on("staff invite report", (list) => {
     invitesList = Array.isArray(list) ? list : [];
+    invitesPage = 0;
     renderInvites();
   });
 

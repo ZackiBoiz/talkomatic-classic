@@ -183,4 +183,17 @@ function summary() {
 
 load();
 
-module.exports = { add, forTarget, lastKnown, summary, clear, flushSync };
+// Is this user currently on the reports board (for live dashboard refreshes)?
+function isTarget(targetKey) {
+  return !!targetKey && byTarget.has(targetKey);
+}
+
+module.exports = {
+  add,
+  forTarget,
+  lastKnown,
+  summary,
+  clear,
+  isTarget,
+  flushSync,
+};

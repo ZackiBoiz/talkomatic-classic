@@ -1,34 +1,17 @@
 // server/invites.js
 // Invite tracking + leaderboard credit, hardened against pending-farming.
-//
-// Each device gets a short, stable invite code; visiting with ?ref=<code>
-// records (once) who referred you. A referral moves through three states:
-//
-//   touched  - the ref link was opened. Counts for NOTHING and is invisible.
-//              This is all a drive-by socket (e.g. a bot that connects, emits
-//              "invite ref", and disconnects) can ever produce, so spamming the
-//              endpoint does not move the board.
-//   pending  - the invitee became a real visitor: chose a custom username (not
-//              an auto "Guest#####"), stayed at least PENDING_MIN_SEC with at
-//              least one participation tick, from an IP the inviter does not
-//              share, and is under the per-IP cap. Only now does it show as
-//              "pending" on the board.
-//   active   - the invitee became an active member (real elapsed calendar time
-//              and sustained presence, see server/identity.js) and does not
-//              share an IP with the inviter. This is the metric that earns
-//              trophies and milestones; it is expensive to fake at scale.
-//
-// Pending self-cleans: a pending that never becomes active within PENDING_TTL
-// is dropped, so a one-time push of real-looking visitors cannot squat the
-// board and farmed numbers melt on their own. Staff can also remove a flagged
-// cluster by hand - soft-deleted, reversible, audited - via report() /
-// purgeCohort() / undoPurge().
-//
-// Power is never granted automatically: hitting MILESTONE_MOD active invites
-// only auto-files a (human-reviewed) mod application.
-//
-// Persisted to invites.json (atomic tmp + rename, debounced), capped, never
-// committed.
+// A referral has three states:
+//   touched - ref link opened; counts for nothing (all a drive-by bot can do).
+//   pending - invitee became a real visitor (custom name + PENDING_MIN_SEC + a
+//             tick, non-shared IP, under the per-IP cap); shows on the board.
+//   active  - invitee became an active member (see identity.js), non-shared IP;
+//             earns trophies and milestones. Expensive to fake at scale.
+// Pending that never goes active expires (PENDING_TTL); staff can also remove a
+// flagged cluster by hand (soft-delete, reversible) via report/purgeCohort/
+// undoPurge. MILESTONE_MOD active invites only auto-file a reviewed application -
+// power is never granted automatically.
+// Persisted to invites.json (atomic, debounced); load() migrates old records
+// forward so the board survives restarts and version updates.
 
 const path = require("path");
 const fs = require("fs");
@@ -85,10 +68,8 @@ function tally(d) {
   return { active, pending, total: active + pending };
 }
 
-// Recompute the top 3 inviters for the trophy badges shown by usernames in the
-// lobby and rooms. A trophy requires at least one ACTIVE invite, so the badge
-// can never be won on pending alone; among those, ordering matches leaderboard()
-// (active first, then pending, then total).
+// Top 3 inviters for the username trophy badges. Requires >= 1 ACTIVE invite, so
+// a trophy can't be won on pending alone; same ordering as leaderboard().
 function recomputeTop() {
   topThree = Object.entries(store.devices)
     .map(([id, d]) => {
@@ -110,10 +91,9 @@ function rankBadge(deviceId) {
   return i >= 0 ? i + 1 : 0;
 }
 
-// Backfill `state` on any pre-existing records (older invites.json had only a
-// `credited` boolean). Credited → active; everything else → pending dated from
-// the original invite, so the 7-day expiry measures from when it was sent and
-// old farmed numbers decay (or can be purged) rather than vanishing at once.
+// Forward-migrate old records (which had only a `credited` boolean): credited →
+// active, otherwise → pending dated from the original invite. Keeps the board
+// intact across the upgrade while letting expiry/purge clean it.
 function migrate() {
   for (const id in store.devices) {
     const d = store.devices[id];

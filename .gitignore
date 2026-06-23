@@ -15,11 +15,13 @@ key-activity.json
 # Runtime counters
 anniversary.json
 
-# Staff v5 runtime data (identity, invites, applications, reports) - never commit
+# Staff v5 runtime data (identity, invites, applications, reports, bans) - never commit
 identity.json
 invites.json
 mod-applications.json
 reports.json
+blocklist.json
+warnings.json
 
 # Dependency directories
 node_modules/

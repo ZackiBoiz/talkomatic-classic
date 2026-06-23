@@ -52,8 +52,11 @@ process.on("uncaughtException", (error) => {
   console.error("=== UNCAUGHT EXCEPTION ===", error.message, error.stack);
 });
 
-// Flush the in-memory stores to disk on a clean shutdown so recent invite
-// credits, names, and applications survive a restart or redeploy.
+// On a clean shutdown, flush every store to disk so nothing is lost in the
+// debounce window. Invites, identity, applications, reports, mod keys, the audit
+// log, and the IP ban list all persist across restarts and version updates -
+// each store's load() tolerates old/missing fields so data migrates forward
+// instead of disappearing.
 function gracefulFlush() {
   try {
     require("./server/invites").flushSync();
@@ -67,16 +70,32 @@ function gracefulFlush() {
   try {
     require("./server/reports").flushSync();
   } catch (e) {}
+  try {
+    require("./server/blocklist").flushSync();
+  } catch (e) {}
+  try {
+    require("./server/warnings").flushSync();
+  } catch (e) {}
 }
 let shuttingDown = false;
-for (const sig of ["SIGINT", "SIGTERM"]) {
-  process.on(sig, () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
+function beginShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received: notifying clients, then shutting down.`);
+  // Tell every client we are restarting so they show a countdown and return to
+  // the lobby, instead of silently freezing on the dropped socket.
+  try {
+    if (state.io) state.io.emit("server restarting", { seconds: 5 });
+  } catch (e) {}
+  // Let the notice flush before we drop sockets, persist, and exit. Stays under
+  // pm2's kill_timeout (default 1600ms).
+  setTimeout(() => {
     gracefulFlush();
     process.exit(0);
-  });
+  }, 800);
 }
+for (const sig of ["SIGINT", "SIGTERM"])
+  process.on(sig, () => beginShutdown(sig));
 process.on("beforeExit", gracefulFlush);
 
 // ── Express & HTTP ──────────────────────────────────────────────────────────
@@ -737,6 +756,7 @@ app.get(`${API}/wc/games`, async (req, res) => {
 
 // Graceful shutdown: save rooms before exit
 async function shutdown(signal) {
+  if (shuttingDown) return; // the signal handler above already runs the shutdown
   console.log(`${signal} received. Saving rooms and shutting down...`);
   try {
     await rooms.saveRooms();

@@ -423,6 +423,8 @@ const socket = io({
       undefined,
   },
 });
+// Restart countdown + reconnect overlay (returns the user to a fresh lobby).
+if (window.TalkomaticConnection) window.TalkomaticConnection.attach(socket);
 
 // ============================================================================
 // 5. DOM REFERENCES & STATE
@@ -605,6 +607,14 @@ socket.on("reconnect", (attemptNumber) => {
   console.log(`Reconnected after ${attemptNumber} attempts`);
   updateConnectionStatus();
   checkSignInStatus();
+});
+
+// Staff warning, including any queued while the user was offline (delivered on
+// connect). Shown as a prominent toast in the lobby.
+socket.on("staff warning", (data) => {
+  const msg = (data && data.message) || "Please follow the Talkomatic rules.";
+  if (window.toastr)
+    toastr.warning(msg, "Staff warning", { timeOut: 12000, closeButton: true });
 });
 
 // One active tab per browser session: if another tab takes over this identity,

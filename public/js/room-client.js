@@ -14,6 +14,9 @@ const socket = io({
       undefined,
   },
 });
+// Restart countdown + reconnect overlay so a server restart sends users to the
+// lobby instead of freezing them on a dead socket.
+if (window.TalkomaticConnection) window.TalkomaticConnection.attach(socket);
 
 let currentUsername = "";
 let currentLocation = "";
@@ -702,6 +705,43 @@ function insertEmote(emoteCode, emoteInfo) {
   }, 10);
 }
 
+// Invite links only credit referrers for people NEW to Talkomatic, so sharing
+// them between users already in a room is pointless and farmable. Detect one in
+// the input, strip the ref code, and warn the sender.
+function hasRefLink(text) {
+  return /[?&]ref=[A-Za-z0-9_-]+/i.test(text);
+}
+function stripRefLinks(text) {
+  return text
+    .replace(/\?ref=[A-Za-z0-9_-]+(?:&([^\s]*))?/gi, (_m, rest) =>
+      rest ? "?" + rest : "",
+    )
+    .replace(/&ref=[A-Za-z0-9_-]+/gi, "");
+}
+let lastRefWarnAt = 0;
+function warnRefLink() {
+  const now = Date.now();
+  if (now - lastRefWarnAt < 8000) return;
+  lastRefWarnAt = now;
+  notify(
+    "Invite links only count for people new to Talkomatic. Everyone here is already on it, so the referral code was removed.",
+    "warning",
+    { title: "Invite links don't work in rooms", fullWidth: true, timeout: 9000 },
+  );
+}
+// Re-render the chat box from selfRawText, e.g. after stripping a ref code.
+function renderChatInputFromRaw() {
+  if (!chatInput) return;
+  const display =
+    wordFilterEnabled && clientWordFilter?.ready
+      ? applyWordFilter(selfRawText)
+      : selfRawText;
+  chatInput.innerHTML = "";
+  chatInput.textContent = display;
+  replaceEmotes(chatInput);
+  placeCursorAtEnd(chatInput);
+}
+
 // Reads the input, reconstructs the raw text if the display is filtered,
 // and sends a diff to the server
 function updateSentMessage() {
@@ -718,6 +758,13 @@ function updateSentMessage() {
       );
     } else {
       selfRawText = currentDisplay;
+    }
+
+    // Neutralize any invite link before it is sent or shown to others.
+    if (hasRefLink(selfRawText)) {
+      selfRawText = stripRefLinks(selfRawText);
+      renderChatInputFromRaw();
+      warnRefLink();
     }
 
     const diff = getDiff(lastSentMessage, selfRawText);

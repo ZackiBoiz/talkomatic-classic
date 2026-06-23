@@ -36,6 +36,8 @@ const modwatch = require("./modwatch");
 const applications = require("./applications");
 const invites = require("./invites");
 const reports = require("./reports");
+const blocklist = require("./blocklist");
+const warnings = require("./warnings");
 
 // Report reason categories (value to human label), shared by the report flow.
 const REPORT_CATEGORIES = {
@@ -595,6 +597,24 @@ function broadcastAppsList() {
     if (s.isDev || (s.isMod && (s.modLevel || 2) >= 2)) sendAppsList(s);
 }
 
+// Push the reports board to every open dashboard (full mods + devs) so new
+// reports and online/offline changes appear live without a manual refresh.
+function broadcastReportsList() {
+  if (!io()) return;
+  const list = buildReportsList();
+  for (const [, s] of io().sockets.sockets)
+    if (s.isModLog && (s.isDev || (s.isMod && (s.modLevel || 2) >= 2)))
+      s.emit("staff reports", list);
+}
+
+// Push the IP ban list to every open dashboard (devs only).
+function broadcastBlockList() {
+  if (!io()) return;
+  const list = buildBlockList();
+  for (const [, s] of io().sockets.sockets)
+    if (s.isModLog && s.isDev) s.emit("dev blocks", list);
+}
+
 // Push fresh invite stats to an inviter if they are connected, so the
 // leaderboard "Your invites" panel updates the moment a referral changes state.
 function pushInviteStats(inviterId) {
@@ -604,10 +624,9 @@ function pushInviteStats(inviterId) {
       s.emit("invite stats", invites.stats(inviterId));
 }
 
-// Promote this socket's referral from touched → pending if the invitee has
-// become a real visitor: a custom username, at least a minute of presence
-// (banked time plus this live session), and a participation tick. The earned-
-// pending gate is exactly what a drive-by "invite ref" bot can never clear.
+// Promote this socket's referral touched → pending once the invitee is a real
+// visitor (custom name + a minute of presence + a tick) - the gate a drive-by
+// "invite ref" bot can't clear.
 function maybePromoteInvite(socket) {
   if (!socket.deviceId) return;
   const r = identity.getRecord(socket.deviceId);
@@ -1691,6 +1710,14 @@ function registerSocketHandlers() {
       );
       socket._idAt = Date.now();
       socket.emit("identity status", identity.summary(socket.deviceId));
+      // Deliver any staff warnings queued while this device was offline. Slight
+      // delay so the page (and its toast handler) is ready to show them.
+      const queuedWarnings = warnings.takeFor(socket.deviceId);
+      if (queuedWarnings.length)
+        setTimeout(() => {
+          for (const w of queuedWarnings)
+            socket.emit("staff warning", { message: w.message });
+        }, 1500);
     }
 
     // Deliver an approved-but-unclaimed mod application: mint the L1 key now
@@ -1944,6 +1971,8 @@ function registerSocketHandlers() {
           // Picking a real username can complete the pending bar for an invitee.
           maybePromoteInvite(socket);
         }
+        // A reported user coming online flips to "online" on dashboards.
+        if (reports.isTarget(userId)) broadcastReportsList();
 
         if (socket.isDev) {
           state.devUsers.add(userId);
@@ -3086,6 +3115,8 @@ function registerSocketHandlers() {
           ts: Date.now(),
           reason,
         });
+        blocklist.saveSoon(); // persist so the ban survives a restart
+        broadcastBlockList();
 
         for (const s of findSocketsByIp(ip)) {
           try {
@@ -3916,6 +3947,8 @@ function registerSocketHandlers() {
           );
         const removed = state.blockedIPs.delete(ip);
         state.botBlacklist.delete(ip);
+        blocklist.saveSoon();
+        broadcastBlockList();
         logStaff(socket, "unblock ip", ip, "-");
         socket.emit("staff action result", {
           action: "unblock ip",
@@ -4173,6 +4206,7 @@ function registerSocketHandlers() {
           .summary()
           .find((s) => s.targetKey === targetUserId);
         reports.clear(targetUserId);
+        broadcastReportsList();
         logStaff(
           socket,
           "dismiss report",
@@ -4280,6 +4314,7 @@ function registerSocketHandlers() {
           minLevel: 2,
         });
         socket.emit("report received", {});
+        broadcastReportsList(); // live-update open dashboards
       }),
     );
 
@@ -4422,6 +4457,9 @@ function registerSocketHandlers() {
         const code =
           typeof data?.code === "string" ? data.code.trim().slice(0, 32) : "";
         if (!code) return;
+        // Referrals are for new people: an already-active member can't be
+        // "invited", which blocks existing users farming links shared in rooms.
+        if (identity.isActive(socket.deviceId)) return;
         invites.setReferrer(socket.deviceId, code, socket.clientIp);
       }),
     );
@@ -4469,11 +4507,61 @@ function registerSocketHandlers() {
       }),
     );
 
+    // ── Warn a reported user, online or offline (any staff) ─────────────
+    // Offline targets are queued by device id and delivered on next connect.
+    socket.on(
+      "staff warn user",
+      safe(async (data) => {
+        if (!requireStaff(socket)) return;
+        const targetUserId =
+          typeof data?.targetUserId === "string" ? data.targetUserId : "";
+        if (!targetUserId) return;
+        const lk = reports.lastKnown(targetUserId);
+        // Hierarchy: a mod cannot warn another staffer (use the stored role when
+        // the target is offline and we cannot read it live).
+        const role = getUserStaffRole(targetUserId) || (lk && lk.role) || null;
+        if (!socket.isDev && role)
+          return socket.emit("staff action result", {
+            ok: false,
+            action: "warn (cannot act on staff)",
+          });
+        let message = sanitizeMessage(
+          typeof data?.message === "string" ? data.message : "",
+        ).slice(0, 1000);
+        if (!message)
+          message =
+            "A moderator has issued you a warning. Please follow the Talkomatic rules.";
+        const online = findSocketsByUserId(targetUserId);
+        let delivered = false;
+        for (const s of online) {
+          s.emit("staff warning", { message });
+          delivered = true;
+        }
+        const deviceId =
+          (online[0] && online[0].deviceId) || (lk && lk.deviceId) || null;
+        if (!delivered && deviceId)
+          warnings.queue(deviceId, message, socket.staffLabel || null);
+        const targetName =
+          (lk && lk.name) || online[0]?.handshake?.session?.username || "user";
+        logStaff(
+          socket,
+          "warn",
+          { name: targetName, id: targetUserId },
+          "-",
+          (delivered ? "delivered: " : "queued for next visit: ") + message,
+        );
+        socket.emit("staff action result", {
+          ok: true,
+          action: delivered
+            ? "warned " + targetName
+            : "warning queued for " + targetName,
+        });
+      }),
+    );
+
     // ── Invite forensics + cleanup (full mods + devs) ───────────────────
-    // A pending invite only counts after a real-visitor signal and expires on
-    // its own, but staff can still investigate and remove a flagged farm by
-    // hand. Removals are soft (reversible by a dev), audited to modlog.txt, and
-    // fed to mod-abuse watch. Raw IPs stay dev-only: mods act on opaque clusters.
+    // Investigate and remove a flagged invite farm. Removals are soft (a dev can
+    // undo), audited, and fed to mod-abuse watch. Raw IPs stay dev-only.
     socket.on(
       "staff get invite report",
       safe(async (data) => {
@@ -4822,6 +4910,9 @@ function registerSocketHandlers() {
             socket.deviceId,
             Date.now() - (socket._idAt || Date.now()),
           );
+        // If a reported user just went offline, refresh the dashboards.
+        if (userId && reports.isTarget(userId))
+          setTimeout(() => broadcastReportsList(), 150);
         if (userId) {
           clearAFKTimers(userId);
           await leaveRoom(socket, userId);
