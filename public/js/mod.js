@@ -577,6 +577,13 @@
       }
       if (b.by) sub.appendChild(document.createTextNode("blocked by " + b.by));
       main.appendChild(sub);
+      const rsn = document.createElement("div");
+      rsn.className = "rc-sub rc-reason" + (b.reason ? "" : " none");
+      rsn.appendChild(icon("fa-quote-left"));
+      rsn.appendChild(
+        document.createTextNode(" " + (b.reason || "No reason given")),
+      );
+      main.appendChild(rsn);
       row.appendChild(main);
 
       const actions = document.createElement("div");
@@ -768,22 +775,85 @@
   }
 
   // ── Reports tab (full mods + devs): reported users with quick actions ──
+  // Report reason categories, each with a color and icon for the board.
+  const REPORT_CATS = {
+    spam: { label: "Spam", color: "var(--blue)", icon: "fa-inbox" },
+    harassment: {
+      label: "Harassment",
+      color: "var(--amber)",
+      icon: "fa-hand-back-fist",
+    },
+    hate: { label: "Hate speech", color: "var(--red)", icon: "fa-skull" },
+    nsfw: { label: "NSFW", color: "var(--purple)", icon: "fa-image" },
+    impersonation: {
+      label: "Impersonation",
+      color: "var(--blue)",
+      icon: "fa-mask",
+    },
+    threats: {
+      label: "Threats",
+      color: "var(--red)",
+      icon: "fa-triangle-exclamation",
+    },
+    modabuse: {
+      label: "Mod abuse",
+      color: "var(--orange)",
+      icon: "fa-user-shield",
+    },
+    other: { label: "Other", color: "var(--dim)", icon: "fa-circle-info" },
+  };
+  const reportCat = (k) => REPORT_CATS[k] || REPORT_CATS.other;
+  const durationLabel = (d) =>
+    d === "1h"
+      ? "1 hour"
+      : d === "24h"
+        ? "24 hours"
+        : d === "7d"
+          ? "7 days"
+          : d === "permanent"
+            ? "permanently"
+            : d;
+  function relTime(ts) {
+    if (!ts) return "";
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 60) return "just now";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + "m ago";
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + "h ago";
+    return Math.floor(h / 24) + "d ago";
+  }
+
   function banReported(r, duration) {
-    const go = () =>
-      socket.emit("staff ip block", { targetUserId: r.targetUserId, duration });
-    if (!window.StaffUI) return go();
-    StaffUI.confirm({
-      title: "IP block",
+    const go = (reason) =>
+      socket.emit("staff ip block", {
+        targetUserId: r.targetUserId,
+        duration,
+        reason: reason || "",
+      });
+    if (!window.StaffUI) return go("");
+    StaffUI.prompt({
+      title: "IP block " + (r.name || "user"),
+      icon: '<i class="fas fa-ban"></i>',
       message:
-        "IP-block " +
-        (r.name || "this user") +
-        " for " +
-        duration +
-        "? They are disconnected immediately.",
+        "Block this user's IP " +
+        durationLabel(duration) +
+        (r.online
+          ? ". They are disconnected immediately."
+          : ". They are offline; the block uses their last known address."),
+      fields: [
+        {
+          name: "value",
+          label: "Reason (optional, saved to the ban list)",
+          type: "textarea",
+          placeholder: "e.g. Repeated harassment after warnings.",
+          maxLength: 500,
+        },
+      ],
       danger: true,
-      confirmText: "Block " + duration,
-    }).then((ok) => {
-      if (ok) go();
+      confirmText: "Block " + durationLabel(duration),
+    }).then((reason) => {
+      if (reason != null) go(reason);
     });
   }
   // Discard a report: tell the server to clear it, then drop it locally right
@@ -793,6 +863,43 @@
     reportsList = reportsList.filter((x) => x.targetUserId !== r.targetUserId);
     renderReports();
   }
+  // One "IP block" button opens a duration picker, so the card stays uncluttered.
+  function openReportBanMenu(r) {
+    if (!window.StaffUI) return banReported(r, "24h");
+    const durs = [
+      { label: "1 hour", value: "1h", icon: '<i class="fas fa-clock"></i>' },
+      { label: "24 hours", value: "24h", icon: '<i class="fas fa-clock"></i>' },
+      {
+        label: "7 days",
+        value: "7d",
+        icon: '<i class="fas fa-calendar-week"></i>',
+      },
+    ];
+    if (me && me.role === "dev")
+      durs.push({
+        label: "Permanent",
+        value: "permanent",
+        icon: '<i class="fas fa-ban"></i>',
+      });
+    StaffUI.menu({
+      title: "IP block " + (r.name || "user"),
+      icon: '<i class="fas fa-ban"></i>',
+      subtitle: r.online
+        ? "Pick a duration"
+        : "Offline; uses their last known address",
+      groups: [
+        {
+          items: durs.map((d) => ({
+            icon: d.icon,
+            label: d.label,
+            danger: true,
+            onClick: () => banReported(r, d.value),
+          })),
+        },
+      ],
+    });
+  }
+
   function renderReports() {
     const wrap = $("reportsList");
     if (!wrap) return;
@@ -810,93 +917,150 @@
       const empty = document.createElement("div");
       empty.className = "empty";
       empty.appendChild(icon("fa-flag"));
-      empty.appendChild(document.createTextNode("No reports yet."));
+      empty.appendChild(document.createTextNode("No reports right now."));
       wrap.appendChild(empty);
       return;
     }
-    const isDev = me && me.role === "dev";
-    const chipStyle =
-      "margin-left:6px;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:700;";
-    reportsList.forEach((r) => {
-      const row = document.createElement("div");
-      row.className = "rowcard";
 
+    reportsList.forEach((r) => {
+      const hot = r.distinct >= 3;
+      const card = document.createElement("div");
+      card.className = "report-card" + (hot ? " hot" : "");
+
+      // Header: avatar, name, reporter count, status, last-report time
+      const head = document.createElement("div");
+      head.className = "rc-head";
       const av = document.createElement("div");
       av.className = "avatar";
-      av.style.background = r.distinct >= 3 ? "#ff5468" : "var(--orange)";
+      av.style.background = hot ? "var(--red)" : "var(--orange)";
       av.textContent = initialOf(r.name);
-      row.appendChild(av);
+      head.appendChild(av);
 
-      const main = document.createElement("div");
-      main.className = "rc-main";
-      const title = span("rc-title", "");
-      title.appendChild(document.createTextNode(r.name || "user"));
-      const cnt = span(
-        "chip",
-        r.distinct + (r.distinct === 1 ? " reporter" : " reporters"),
+      const idCol = document.createElement("div");
+      idCol.className = "rc-id";
+      idCol.appendChild(span("rc-kicker", "Reported user"));
+      idCol.appendChild(span("nm", r.name || "user"));
+      const meta = document.createElement("div");
+      meta.className = "rc-meta";
+      const cnt = span("rbadge " + (hot ? "count" : "warm"));
+      cnt.appendChild(icon("fa-user-group"));
+      cnt.appendChild(
+        document.createTextNode(
+          " " + r.distinct + (r.distinct === 1 ? " reporter" : " reporters"),
+        ),
       );
-      cnt.style.cssText = chipStyle + "background:#ff5468;color:#fff;";
-      title.appendChild(cnt);
-      const st = span(
-        "chip",
-        r.online ? (r.roomName ? "in " + r.roomName : "online") : "offline",
+      meta.appendChild(cnt);
+      const st = span("rbadge " + (r.online ? "on" : "off"));
+      st.appendChild(icon(r.online ? "fa-circle" : "fa-moon"));
+      st.appendChild(
+        document.createTextNode(
+          " " +
+            (r.online
+              ? r.roomName
+                ? "in " + r.roomName
+                : "online"
+              : "offline"),
+        ),
       );
-      st.style.cssText =
-        chipStyle +
-        (r.online
-          ? "background:#1f6f43;color:#d8ffe9;"
-          : "background:#3a3f4a;color:#cfd3da;");
-      title.appendChild(st);
-      main.appendChild(title);
+      meta.appendChild(st);
+      if (r.last) meta.appendChild(span(null, "last report " + relTime(r.last)));
+      idCol.appendChild(meta);
+      head.appendChild(idCol);
+      card.appendChild(head);
 
-      const cats = Object.entries(r.categories || {})
-        .map(([k, v]) => k + " x" + v)
-        .join(", ");
-      if (cats) main.appendChild(span("rc-sub", cats));
-      (r.reasons || []).slice(0, 3).forEach((rr) => {
-        if (rr.reason)
-          main.appendChild(
-            span("rc-sub mono", (rr.by || "?") + ": " + rr.reason),
-          );
+      // Category summary tags, most-used first
+      const catEntries = Object.entries(r.categories || {}).sort(
+        (a, b) => b[1] - a[1],
+      );
+      if (catEntries.length) {
+        const cats = document.createElement("div");
+        cats.className = "rc-cats";
+        cats.appendChild(span("lead", "Reported for"));
+        catEntries.forEach(([k, v]) => {
+          const c = reportCat(k);
+          const tag = document.createElement("span");
+          tag.className = "ctag";
+          tag.style.color = c.color;
+          tag.appendChild(icon(c.icon));
+          tag.appendChild(document.createTextNode(" " + c.label));
+          tag.appendChild(span("n", " x" + v));
+          cats.appendChild(tag);
+        });
+        card.appendChild(cats);
+      }
+
+      // "Who reported" header + one row per reporter, so it is unmistakable
+      // that the people listed here are the reporters, not the user above.
+      const reasons = r.reasons || [];
+      const logHead = document.createElement("div");
+      logHead.className = "report-log-head";
+      logHead.textContent = "Who reported (" + reasons.length + ")";
+      card.appendChild(logHead);
+      const log = document.createElement("div");
+      log.className = "report-log";
+      reasons.forEach((rr) => {
+        const c = reportCat(rr.category);
+        const item = document.createElement("div");
+        item.className = "rlog";
+        item.appendChild(span("rl-av", initialOf(rr.by || "?")));
+        const m = document.createElement("div");
+        m.className = "rl-main";
+        const top = document.createElement("div");
+        top.className = "rl-top";
+        top.appendChild(span("rl-by", rr.by || "Someone"));
+        top.appendChild(span("rl-said", "reported for"));
+        const cat = span("rl-cat", c.label);
+        cat.style.color = c.color;
+        cat.style.borderColor = c.color;
+        top.appendChild(cat);
+        if (rr.at) top.appendChild(span("rl-when", relTime(rr.at)));
+        m.appendChild(top);
+        m.appendChild(
+          span(
+            "rl-reason" + (rr.reason ? "" : " none"),
+            rr.reason || "No note left",
+          ),
+        );
+        item.appendChild(m);
+        log.appendChild(item);
       });
-      row.appendChild(main);
+      card.appendChild(log);
 
-      const actions = document.createElement("div");
-      actions.className = "rc-actions";
-      const mkBtn = (label, danger, fn) => {
+      // Footer actions
+      const foot = document.createElement("div");
+      foot.className = "rc-foot";
+      const mkBtn = (label, faIcon, danger, fn) => {
         const b = document.createElement("button");
         b.className = "btn sm" + (danger ? " danger" : "");
-        b.textContent = label;
+        if (faIcon) b.appendChild(icon(faIcon));
+        b.appendChild(document.createTextNode((faIcon ? " " : "") + label));
         b.addEventListener("click", fn);
         return b;
       };
-      if (r.online) {
-        actions.appendChild(
-          mkBtn("Kick", false, () =>
+      if (r.online)
+        foot.appendChild(
+          mkBtn("Kick", "fa-door-open", false, () =>
             socket.emit("staff kick", { targetUserId: r.targetUserId }),
           ),
         );
-        actions.appendChild(mkBtn("Ban 1h", true, () => banReported(r, "1h")));
-        actions.appendChild(
-          mkBtn("Ban 24h", true, () => banReported(r, "24h")),
+      if (r.online || r.canBanOffline)
+        foot.appendChild(
+          mkBtn("IP block", "fa-ban", true, () => openReportBanMenu(r)),
         );
-        actions.appendChild(mkBtn("Ban 7d", true, () => banReported(r, "7d")));
-        if (isDev)
-          actions.appendChild(
-            mkBtn("Ban perm", true, () => banReported(r, "permanent")),
-          );
-      }
-      // Discard (X): clear a false or already-handled report. Always available,
-      // online or offline. Real reports should be kept so the history builds up.
-      const discard = document.createElement("button");
-      discard.className = "btn sm rc-discard";
-      discard.title = "Discard report";
-      discard.setAttribute("aria-label", "Discard report");
-      discard.appendChild(icon("fa-xmark"));
-      discard.addEventListener("click", () => dismissReport(r));
-      actions.appendChild(discard);
-      row.appendChild(actions);
-      wrap.appendChild(row);
+      else
+        foot.appendChild(
+          span("note", "Offline with no address on file, cannot block."),
+        );
+      foot.appendChild(span("spacer"));
+      const discard = mkBtn("Discard", "fa-xmark", false, () =>
+        dismissReport(r),
+      );
+      discard.classList.add("rc-discard");
+      discard.title = "Clear this report as false or already handled";
+      foot.appendChild(discard);
+      card.appendChild(foot);
+
+      wrap.appendChild(card);
     });
   }
 

@@ -64,6 +64,9 @@ function gracefulFlush() {
   try {
     require("./server/applications").flushSync();
   } catch (e) {}
+  try {
+    require("./server/reports").flushSync();
+  } catch (e) {}
 }
 let shuttingDown = false;
 for (const sig of ["SIGINT", "SIGTERM"]) {
@@ -519,7 +522,7 @@ app.get(`${API}/rooms`, apiAuth, (req, res) => {
           })),
         isFull:
           (r.users || []).filter((u) => !u.isDev || !u.isVanished).length >=
-          CONFIG.LIMITS.MAX_ROOM_CAPACITY,
+          rooms.roomCapacity(r),
       }));
     state.apiCache.set("public_rooms", { timestamp: Date.now(), data });
     res.json(data);
@@ -545,7 +548,7 @@ app.get(`${API}/rooms/:id`, apiAuth, (req, res) => {
       })),
     isFull:
       (room.users || []).filter((u) => !u.isDev || !u.isVanished).length >=
-      CONFIG.LIMITS.MAX_ROOM_CAPACITY,
+      rooms.roomCapacity(room),
   });
 });
 
@@ -655,7 +658,7 @@ app.post(`${API}/rooms/:id/join`, apiAuth, async (req, res) => {
     return sendErrorResponse(res, ERROR_CODES.NOT_FOUND, "Room not found", 404);
   if (
     (room.users || []).filter((u) => !u.isDev || !u.isVanished).length >=
-    CONFIG.LIMITS.MAX_ROOM_CAPACITY
+    rooms.roomCapacity(room)
   )
     return sendErrorResponse(res, ERROR_CODES.ROOM_FULL, "Full", 400);
   if (room.type === "semi-private") {

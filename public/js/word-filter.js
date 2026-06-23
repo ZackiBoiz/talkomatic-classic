@@ -1,6 +1,6 @@
 // ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║  word-filter.js — Talkomatic word filter (server)                        ║
-// ║  v2.1.0 — June 2026 anniversary batch                                    ║
+// ║  word-filter.js - Talkomatic word filter (server)                        ║
+// ║  v2.1.0 - June 2026 anniversary batch                                    ║
 // ║                                                                           ║
 // ║  HARDENING (this version):                                                ║
 // ║  • Cross-newline detection: a whole-text scan supplements the per-line   ║
@@ -11,7 +11,7 @@
 // ║  • Doubled-letter detection: a fully-collapsed variant scan (text AND    ║
 // ║    word lists collapsed the same way) catches "fuuck".                   ║
 // ║  • Span gate: variant scans only accept a match when the original text   ║
-// ║    region is LONGER than the matched word — i.e. some bypass character   ║
+// ║    region is LONGER than the matched word - i.e. some bypass character   ║
 // ║    was actually present. Clean words can never be flagged by a variant   ║
 // ║    scan, so false positives are no worse than the primary scan.          ║
 // ║  • Unicode index fix: normalization and index-mapping are now built in   ║
@@ -939,9 +939,9 @@ class WordFilter {
   /**
    * Main detection entry point.
    *
-   * PASS 1 — per-line scan (cached per line): the accurate, legacy-equivalent
+   * PASS 1 - per-line scan (cached per line): the accurate, legacy-equivalent
    *          scan that handles the vast majority of content.
-   * PASS 2 — bypass-hardening scans on the whole text (each span-gated):
+   * PASS 2 - bypass-hardening scans on the whole text (each span-gated):
    *   a) standard normalization across newlines  → catches "f\nu\nc\nk"
    *   b) digits dropped                          → catches "fu1ck"
    *   c) repeats fully collapsed + collapsed tries → catches "fuuck"
@@ -973,7 +973,7 @@ class WordFilter {
 
     // ── PASS 2: bypass-hardening variant scans (span-gated) ──
 
-    // (a) cross-newline — only useful when there IS more than one line
+    // (a) cross-newline - only useful when there IS more than one line
     if (lines.length > 1) {
       ranges.push(
         ...this.scanVariant(
@@ -986,7 +986,7 @@ class WordFilter {
       );
     }
 
-    // (b) digit padding — only when the text contains a digit
+    // (b) digit padding - only when the text contains a digit
     if (/[0-9]/.test(text)) {
       ranges.push(
         ...this.scanVariant(
@@ -999,7 +999,7 @@ class WordFilter {
       );
     }
 
-    // (c) doubled letters — collapsed text vs collapsed word lists
+    // (c) doubled letters - collapsed text vs collapsed word lists
     ranges.push(
       ...this.scanVariant(
         text,

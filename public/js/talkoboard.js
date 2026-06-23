@@ -215,7 +215,7 @@ class Talkoboard {
     drawGroup.className = "tb-group";
 
     // Hand tool sits left of the pen so you can drag to move the board with
-    // one finger — much easier than two-finger panning on mobile.
+    // one finger - much easier than two-finger panning on mobile.
     this.panBtn = this.makeBtn(
       "tb-tool-btn tb-icon-btn",
       '<i class="fas fa-hand"></i>',
@@ -1192,7 +1192,7 @@ class Talkoboard {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // EXPORT — save the WHOLE board (every stroke) as a PNG, regardless of the
+  // EXPORT - save the WHOLE board (every stroke) as a PNG, regardless of the
   // current pan/zoom. Renders strokes onto an offscreen canvas sized to their
   // bounding box, flattened onto white so erased areas read as white.
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1271,7 +1271,7 @@ class Talkoboard {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // DRAWING — FULL REDRAW (pan/zoom/resize triggers this)
+  // DRAWING - FULL REDRAW (pan/zoom/resize triggers this)
   // ═══════════════════════════════════════════════════════════════════════════
 
   redraw() {
@@ -1331,7 +1331,7 @@ class Talkoboard {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // STROKE RENDERING — BEZIER SMOOTH (used in full redraws)
+  // STROKE RENDERING - BEZIER SMOOTH (used in full redraws)
   // ═══════════════════════════════════════════════════════════════════════════
 
   renderStrokeSmooth(ctx, stroke) {
@@ -1447,7 +1447,7 @@ class Talkoboard {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // STROKE RENDERING — INCREMENTAL (used during live drawing, no full redraw)
+  // STROKE RENDERING - INCREMENTAL (used during live drawing, no full redraw)
   // Draws only from fromIndex onward, connecting to existing canvas content.
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1716,7 +1716,7 @@ class Talkoboard {
     }
 
     // Incremental render: draw from the last existing point through new points
-    // This bridges the gap between batches — the key smoothness fix
+    // This bridges the gap between batches - the key smoothness fix
     if (this.isOpen && prevLen > 0) {
       this.drawSegmentsIncremental(stroke, prevLen - 1);
     }

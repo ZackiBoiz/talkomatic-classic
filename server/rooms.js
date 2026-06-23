@@ -458,14 +458,46 @@ function logStaff(socket, action, target, room, details) {
     });
 }
 
+// Best-effort last-known IP for a reported user who is now offline, so staff
+// can still IP-block them from the board. Prefers the IP captured with the
+// report, then falls back to the most-used IP on file for their device. Used
+// server-side only; the address is never sent to a moderator.
+function resolveOfflineTarget(targetUserId) {
+  const lk = reports.lastKnown(targetUserId);
+  if (!lk) return null;
+  let ip = lk.ip;
+  if (!ip && lk.deviceId) {
+    const rec = identity.getRecord(lk.deviceId);
+    if (rec && rec.ips) {
+      let best = null,
+        bestN = -1;
+      for (const k of Object.keys(rec.ips))
+        if (rec.ips[k] > bestN) {
+          best = k;
+          bestN = rec.ips[k];
+        }
+      ip = best;
+    }
+  }
+  return {
+    ip: ip || null,
+    name: lk.name || null,
+    role: lk.role || null,
+    deviceId: lk.deviceId || null,
+  };
+}
+
 // Build the reports board payload (shared by the get + dismiss handlers): one
 // row per reported user, with the live name/room resolved when they are online.
+// For offline users we flag whether the server still has an IP on file, so the
+// board can offer an IP block without ever sending the address to the client.
 function buildReportsList() {
   return reports.summary().map((s) => {
     const targets = findSocketsByUserId(s.targetKey);
     const online = targets.length > 0;
     let name = s.name;
     let roomName = null;
+    let canBanOffline = false;
     if (online) {
       const rid = getUserCurrentRoom(s.targetKey);
       const room = rid ? state.rooms.get(rid) : null;
@@ -473,6 +505,10 @@ function buildReportsList() {
       name =
         (u && u.username) || targets[0].handshake?.session?.username || name;
       roomName = room?.name || null;
+    } else {
+      const off = resolveOfflineTarget(s.targetKey);
+      canBanOffline = !!off?.ip;
+      if (off?.name) name = off.name;
     }
     return {
       targetUserId: s.targetKey,
@@ -482,9 +518,11 @@ function buildReportsList() {
       categories: s.categories,
       online,
       roomName,
+      canBanOffline,
+      first: s.first,
+      last: s.last,
       reasons: reports
         .forTarget(s.targetKey)
-        .slice(-8)
         .reverse()
         .map((r) => ({
           category: r.category,
@@ -2936,24 +2974,42 @@ function registerSocketHandlers() {
           );
         }
         const targetSocket = findSocketsByUserId(targetUserId)[0];
-        const ip = targetSocket?.clientIp;
-        if (!ip)
-          return socket.emit(
-            "error",
-            createErrorResponse(
-              ERROR_CODES.NOT_FOUND,
-              "Could not determine the user's IP.",
-            ),
-          );
-        const expiry =
-          ms === Infinity ? Number.MAX_SAFE_INTEGER : Date.now() + ms;
         const roomId = getUserCurrentRoom(targetUserId);
         const room = roomId ? state.rooms.get(roomId) : null;
         const targetUser = room?.users.find((u) => u.id === targetUserId);
-        const blockedName =
-          targetUser?.username ||
-          targetSocket?.handshake?.session?.username ||
-          null;
+        let ip = targetSocket?.clientIp || null;
+        let blockedName = null;
+        if (ip) {
+          blockedName =
+            targetUser?.username ||
+            targetSocket?.handshake?.session?.username ||
+            null;
+        } else {
+          // Offline: fall back to the IP captured on the report board. We cannot
+          // read the target's role from a live socket, so enforce the staff
+          // hierarchy with the role recorded when they were last seen.
+          const off = resolveOfflineTarget(targetUserId);
+          if (!off || !off.ip)
+            return socket.emit(
+              "error",
+              createErrorResponse(
+                ERROR_CODES.NOT_FOUND,
+                "No IP on file for this user. They need to be reported at least once while online before an offline block is possible.",
+              ),
+            );
+          if (off.role === "dev" || (off.role === "mod" && !socket.isDev))
+            return socket.emit(
+              "error",
+              createErrorResponse(
+                ERROR_CODES.FORBIDDEN,
+                "You cannot act on this user.",
+              ),
+            );
+          ip = off.ip;
+          blockedName = off.name || null;
+        }
+        const expiry =
+          ms === Infinity ? Number.MAX_SAFE_INTEGER : Date.now() + ms;
         const reason =
           sanitizeMessage(
             typeof data?.reason === "string" ? data.reason : "",
@@ -4127,6 +4183,11 @@ function registerSocketHandlers() {
         socket._lastReport = now;
         const reporter = socket.handshake.session?.username || "A user";
         const catLabel = REPORT_CATEGORIES[category];
+        const targetRole = targetSocket?.isDev
+          ? "dev"
+          : targetSocket?.isMod
+            ? "mod"
+            : null;
         const tally = reports.add({
           targetKey: targetUserId,
           targetName,
@@ -4134,9 +4195,13 @@ function registerSocketHandlers() {
           byName: reporter,
           category,
           reason,
+          // Remember how to reach the target if they later go offline, so staff
+          // can still act from the board. The IP is never sent to the client.
+          targetIp: targetSocket?.clientIp || null,
+          targetDeviceId: targetSocket?.deviceId || null,
+          targetRole,
         });
-        const targetIsStaff =
-          !!targetSocket && (targetSocket.isDev || targetSocket.isMod);
+        const targetIsStaff = !!targetRole;
         const text =
           `${reporter} reported ${targetName}${targetIsStaff ? " (staff)" : ""} for ${catLabel}` +
           (reason ? `: ${reason}` : "") +
@@ -4857,4 +4922,5 @@ module.exports = {
   startRoomDeletionTimer,
   leaveRoom,
   joinRoom,
+  roomCapacity,
 };

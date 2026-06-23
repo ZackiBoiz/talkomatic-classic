@@ -508,6 +508,7 @@
           class: "tk-item" + (it.danger ? " tk-d" : ""),
           type: "button",
         });
+        if (it.id) btn.id = it.id;
         if (it.disabled) btn.disabled = true;
         const tone = it.tone || (it.danger ? "danger" : iconTone(it.icon));
         btn.appendChild(iconNode(it.icon || "•", "tk-iico t-" + tone));

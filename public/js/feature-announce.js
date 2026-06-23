@@ -1,5 +1,5 @@
 // ============================================================================
-// feature-announce.js — One-time "New Feature" modal for word filter toggle
+// feature-announce.js - One-time "New Feature" modal for word filter toggle
 // Dismissed via cookie for 60 days.
 // ============================================================================
 (function () {

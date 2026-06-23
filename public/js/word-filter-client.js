@@ -1,6 +1,6 @@
 // ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║  word-filter-client.js — Full browser port of server word-filter.js      ║
-// ║  v2.1.0 — June 2026 anniversary batch                                    ║
+// ║  word-filter-client.js - Full browser port of server word-filter.js      ║
+// ║  v2.1.0 - June 2026 anniversary batch                                    ║
 // ║                                                                           ║
 // ║  IDENTICAL algorithm to the server filter (cross-newline scan, digit-    ║
 // ║  padding scan, doubled-letter scan, span gate, code-point indexing,      ║

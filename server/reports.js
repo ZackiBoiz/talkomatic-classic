@@ -1,15 +1,75 @@
 // server/reports.js
-// In-memory tally of user reports so staff can see how many distinct people
-// reported someone, and why. Not persisted (resets on restart by design); the
+// Tally of user reports so staff can see how many distinct people reported
+// someone, and why. Persisted to disk so the board survives a restart; the
 // individual reports also flow into the audit feed for the permanent record.
 // "distinct" counts unique reporters by device, so one person spamming the
 // report button cannot inflate the number.
+//
+// Each report also remembers the target's last-known IP, device id, and role
+// (captured while they were online). That lets staff act on a reported user
+// from the board even after they disconnect, without ever exposing the raw IP
+// to a moderator (the server resolves it). The role is kept so the staff
+// hierarchy still holds when the target is offline and we cannot read it live.
 
-const WINDOW_MS = 24 * 60 * 60 * 1000; // keep a target's reports for 24h
+const path = require("path");
+const fs = require("fs");
+const fsp = require("fs").promises;
+
+const STORE_PATH = path.join(__dirname, "..", "reports.json");
+
+const WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // keep a target's reports for 7 days
 const MAX_TARGETS = 5000;
 const MAX_PER_TARGET = 100;
 
-const byTarget = new Map(); // targetKey -> [{ byDeviceId, byName, category, reason, at }]
+let byTarget = new Map(); // targetKey -> [{ byDeviceId, byName, category, reason, at, targetIp, targetDeviceId, targetRole }]
+let saveTimer = null;
+let dirty = false;
+
+function load() {
+  try {
+    const raw = fs.readFileSync(STORE_PATH, "utf8");
+    const obj = JSON.parse(raw);
+    byTarget = new Map();
+    if (obj && typeof obj === "object") {
+      for (const [k, arr] of Object.entries(obj))
+        if (Array.isArray(arr)) byTarget.set(k, arr);
+    }
+    prune(Date.now());
+  } catch (err) {
+    if (err.code !== "ENOENT") console.error("Error loading reports.json:", err);
+    byTarget = new Map();
+  }
+}
+
+// Atomic write (tmp + rename), debounced, mirrors the other JSON stores.
+function saveSoon() {
+  dirty = true;
+  if (saveTimer) return;
+  saveTimer = setTimeout(async () => {
+    saveTimer = null;
+    if (!dirty) return;
+    dirty = false;
+    try {
+      const tmp = STORE_PATH + ".tmp";
+      await fsp.writeFile(tmp, JSON.stringify(Object.fromEntries(byTarget)), "utf8");
+      await fsp.rename(tmp, STORE_PATH);
+    } catch (e) {
+      console.error("reports save failed:", e);
+    }
+  }, 3000);
+}
+
+// Synchronous write for a clean shutdown, so a report filed seconds before a
+// restart is not lost inside the debounce window.
+function flushSync() {
+  try {
+    const tmp = STORE_PATH + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(byTarget)), "utf8");
+    fs.renameSync(tmp, STORE_PATH);
+  } catch (e) {
+    console.error("reports flush failed:", e);
+  }
+}
 
 function prune(now) {
   for (const [k, arr] of byTarget) {
@@ -34,7 +94,17 @@ function distinctReporters(list) {
 }
 
 // Record a report and return { total, distinct } for the target.
-function add({ targetKey, targetName, byDeviceId, byName, category, reason }) {
+function add({
+  targetKey,
+  targetName,
+  byDeviceId,
+  byName,
+  category,
+  reason,
+  targetIp,
+  targetDeviceId,
+  targetRole,
+}) {
   if (!targetKey) return { total: 0, distinct: 0 };
   const now = Date.now();
   let arr = byTarget.get(targetKey);
@@ -49,9 +119,13 @@ function add({ targetKey, targetName, byDeviceId, byName, category, reason }) {
     category: category || "other",
     reason: reason || null,
     at: now,
+    targetIp: targetIp || null,
+    targetDeviceId: targetDeviceId || null,
+    targetRole: targetRole || null,
   });
   if (arr.length > MAX_PER_TARGET) arr.splice(0, arr.length - MAX_PER_TARGET);
   prune(now);
+  saveSoon();
   const list = byTarget.get(targetKey) || [];
   return { total: list.length, distinct: distinctReporters(list) };
 }
@@ -61,9 +135,31 @@ function forTarget(targetKey) {
   return (byTarget.get(targetKey) || []).slice();
 }
 
+// The most recent IP, device id, name, and role we ever captured for a target,
+// so staff can act on them once they go offline. Each field is taken from the
+// newest report that carries it.
+function lastKnown(targetKey) {
+  const arr = byTarget.get(targetKey);
+  if (!arr || !arr.length) return null;
+  let ip = null,
+    deviceId = null,
+    name = null,
+    role = null;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const r = arr[i];
+    if (!ip && r.targetIp) ip = r.targetIp;
+    if (!deviceId && r.targetDeviceId) deviceId = r.targetDeviceId;
+    if (!name && r.targetName) name = r.targetName;
+    if (!role && r.targetRole) role = r.targetRole;
+  }
+  return { ip, deviceId, name, role };
+}
+
 // Drop every report against one target (staff discarded it as false/handled).
 function clear(targetKey) {
-  return byTarget.delete(targetKey);
+  const had = byTarget.delete(targetKey);
+  if (had) saveSoon();
+  return had;
 }
 
 // Compact per-target summary, most-reported first (for a dashboard view).
@@ -78,10 +174,13 @@ function summary() {
       total: arr.length,
       distinct: distinctReporters(arr),
       categories: cats,
+      first: arr.length ? arr[0].at : 0,
       last: arr.length ? arr[arr.length - 1].at : 0,
     });
   }
   return out.sort((a, b) => b.distinct - a.distinct || b.total - a.total);
 }
 
-module.exports = { add, forTarget, summary, clear };
+load();
+
+module.exports = { add, forTarget, lastKnown, summary, clear, flushSync };

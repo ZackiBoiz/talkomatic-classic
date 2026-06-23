@@ -221,7 +221,7 @@ function showDiscordInviteNotification() {
 
   container.appendChild(button);
 
-  // Convert container to HTML for Toastr (listeners do NOT survive this —
+  // Convert container to HTML for Toastr (listeners do NOT survive this -
   // they are attached to the LIVE toast below instead)
   const contentHTML = container.outerHTML;
 

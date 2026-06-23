@@ -1658,16 +1658,34 @@ socket.on("dev context", (ctx) => {
   renderDevContext();
 });
 
+// Update a still-open Staff panel item's label in place. The panel keeps items
+// open after a click, so a toggle's label would otherwise stay stale until the
+// panel is reopened.
+function setStaffItemLabel(id, label) {
+  const item = document.getElementById(id);
+  if (!item) return;
+  const lbl = item.querySelector(".tk-ilabel");
+  if (lbl) lbl.textContent = label;
+}
+
 socket.on("dev vanish status", (data) => {
   currentUserIsVanished = !!data?.isVanished;
   const button = document.getElementById("devVanishToggle");
   updateDevVanishButton(button);
+  setStaffItemLabel(
+    "staffVanishItem",
+    currentUserIsVanished ? "Vanish: ON" : "Vanish: OFF",
+  );
 });
 
 socket.on("dev hide status", (data) => {
   currentUserIsHidden = !!data?.isHidden;
   const button = document.getElementById("devHideToggle");
   updateDevHideButton(button);
+  setStaffItemLabel(
+    "staffHideItem",
+    currentUserIsHidden ? "Show my flair" : "Hide my flair",
+  );
   refreshCurrentUserAppearance();
   renderDevContext();
 });
@@ -3104,6 +3122,7 @@ function openStaffPanel() {
   // Appearance (moved out of the navbar to keep it tidy on mobile)
   const appearanceItems = [
     {
+      id: "staffHideItem",
       icon: currentUserIsHidden
         ? '<i class="fas fa-eye-slash"></i>'
         : '<i class="fas fa-eye"></i>',
@@ -3117,8 +3136,9 @@ function openStaffPanel() {
   ];
   if (currentUserIsDev) {
     appearanceItems.push({
+      id: "staffVanishItem",
       icon: '<i class="fas fa-ghost"></i>',
-      label: currentUserIsVanished ? "Vanish: ON " : "Vanish: OFF ",
+      label: currentUserIsVanished ? "Vanish: ON" : "Vanish: OFF",
       desc: "Invisible to non-devs; takes no room slot",
       onClick: () =>
         socket.emit("dev set vanish", { isVanished: !currentUserIsVanished }),
@@ -3149,6 +3169,7 @@ function openStaffPanel() {
       },
     });
     appearanceItems.push({
+      id: "staffIpItem",
       icon: devShowIP
         ? '<i class="fas fa-globe"></i>'
         : '<i class="fas fa-eye-slash"></i>',
@@ -3159,6 +3180,10 @@ function openStaffPanel() {
         localStorage.setItem(
           "talkomatic_devShowIP",
           devShowIP ? "true" : "false",
+        );
+        setStaffItemLabel(
+          "staffIpItem",
+          devShowIP ? "User IPs: showing" : "User IPs: hidden",
         );
         renderDevContext();
       },
