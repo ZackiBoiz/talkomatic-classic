@@ -2396,9 +2396,8 @@ function renderLbGlobal(content) {
     const rank = start + idx + 1;
     const active = row.active || 0;
     const pending = row.pending || 0;
-    // Trophies are earned by active invites only, so a top-3 row that has no
-    // active invites yet shows a plain number rather than a medal.
-    const medal = rank <= 3 && active > 0;
+    // The top three on the board always get gold, silver, and bronze.
+    const medal = rank <= 3;
     const r = document.createElement("div");
     r.className =
       "tk-lb-brow" + (medal ? " top" + rank : "") + (row.mine ? " mine" : "");
@@ -2483,7 +2482,7 @@ function renderLbGlobal(content) {
   const legend = document.createElement("div");
   legend.className = "tk-lb-legend";
   legend.textContent =
-    "Active = friends who joined and became members. Pending = invited but not active yet. Trophies go to the top inviters by active invites.";
+    "Active = friends who joined and became members. Pending = invited but not active yet. The top three get gold, silver, and bronze.";
   content.appendChild(legend);
 
   if (pages > 1) {
