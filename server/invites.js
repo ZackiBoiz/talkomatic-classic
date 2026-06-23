@@ -188,20 +188,52 @@ function invitees(deviceId) {
   }));
 }
 
-function leaderboard(limit = 20) {
+// Everyone who has sent at least one invite (pending OR active), so the board is
+// populated and people can find themselves. Ranked by active invites first (the
+// metric that earns trophies and milestones), then by pending, then by total.
+function leaderboard(limit = 100) {
   return Object.entries(store.devices)
-    .map(([id, d]) => ({ deviceId: id, credited: d.credited || 0 }))
-    .filter((x) => x.credited > 0)
-    .sort((a, b) => b.credited - a.credited)
-    .slice(0, Math.max(1, Math.min(limit, 100)));
+    .map(([id, d]) => {
+      const total = Object.keys(d.invited || {}).length;
+      const active = d.credited || 0;
+      return {
+        deviceId: id,
+        active,
+        pending: Math.max(0, total - active),
+        total,
+      };
+    })
+    .filter((x) => x.total > 0)
+    .sort(
+      (a, b) => b.active - a.active || b.pending - a.pending || b.total - a.total,
+    )
+    .slice(0, Math.max(1, Math.min(limit, 200)));
 }
 
+// A device's position on the board, using the same ordering as leaderboard().
+// Anyone who has sent at least one invite gets a rank; 0 means "not yet on it".
 function rankOf(deviceId) {
-  const c = (store.devices[deviceId] || {}).credited || 0;
-  if (c <= 0) return 0;
+  const me = store.devices[deviceId];
+  if (!me) return 0;
+  const total = Object.keys(me.invited || {}).length;
+  if (total <= 0) return 0;
+  const active = me.credited || 0;
+  const pending = Math.max(0, total - active);
   let rank = 1;
-  for (const id in store.devices)
-    if ((store.devices[id].credited || 0) > c) rank++;
+  for (const id in store.devices) {
+    if (id === deviceId) continue;
+    const d = store.devices[id];
+    const t = Object.keys(d.invited || {}).length;
+    if (t <= 0) continue;
+    const a = d.credited || 0;
+    const p = Math.max(0, t - a);
+    if (
+      a > active ||
+      (a === active && p > pending) ||
+      (a === active && p === pending && t > total)
+    )
+      rank++;
+  }
   return rank;
 }
 

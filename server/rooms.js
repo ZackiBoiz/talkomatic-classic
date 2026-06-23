@@ -4367,12 +4367,15 @@ function registerSocketHandlers() {
         const now = Date.now();
         if (now - (socket._lbAt || 0) < 3000) return; // light throttle
         socket._lbAt = now;
-        const top = invites.leaderboard(100).map((e) => {
+        const top = invites.leaderboard(200).map((e) => {
           const r = identity.getRecord(e.deviceId) || {};
           return {
             name: r.name || "Anonymous",
             location: r.loc || "",
-            credited: e.credited,
+            active: e.active,
+            pending: e.pending,
+            total: e.total,
+            mine: !!socket.deviceId && e.deviceId === socket.deviceId,
           };
         });
         const you = socket.deviceId

@@ -2132,6 +2132,68 @@ function switchLbTab(tab, activeBtn, otherBtn) {
   renderLbContent();
 }
 
+// A friendly, themed explainer for how invites + the board work. Uses the
+// shared StaffUI alert (which now matches the site theme) with a rich body.
+function openInviteHelp() {
+  if (!window.StaffUI) return;
+  const wrap = document.createElement("div");
+  const steps = [
+    [
+      "fa-link",
+      "Share your link",
+      "Copy your personal invite link from the Your invites tab and send it to friends.",
+    ],
+    [
+      "fa-user-plus",
+      "They become a pending invite",
+      "The moment a friend opens Talkomatic from your link, they show up as a pending invite.",
+    ],
+    [
+      "fa-circle-check",
+      "Pending turns into active",
+      "Once that friend sticks around and becomes an active member (chatting across a few days, on their own connection), they count as an active invite.",
+    ],
+    [
+      "fa-ranking-star",
+      "Climb the board",
+      "The leaderboard ranks everyone by active invites, and pending invites are shown too, so you appear as soon as someone uses your link.",
+    ],
+    [
+      "fa-award",
+      "Earn rewards",
+      "Reach 10 active invites and a moderator application is filed for you to review. 100 is a community milestone. The top 3 inviters get a gold, silver, or bronze trophy beside their name everywhere.",
+    ],
+  ];
+  steps.forEach(([ic, t, d]) => {
+    const row = document.createElement("div");
+    row.style.cssText =
+      "display:flex;gap:13px;margin-bottom:15px;align-items:flex-start;";
+    const i = document.createElement("div");
+    i.style.cssText =
+      "flex:none;width:36px;height:36px;border-radius:8px;background:rgba(255,152,0,.12);border:1px solid rgba(255,152,0,.3);color:#ff9800;display:flex;align-items:center;justify-content:center;font-size:15px;";
+    i.innerHTML = '<i class="fas ' + ic + '"></i>';
+    const tx = document.createElement("div");
+    const h = document.createElement("div");
+    h.style.cssText = "font-weight:bold;color:#fff;margin-bottom:3px;";
+    h.textContent = t;
+    const p = document.createElement("div");
+    p.style.cssText = "color:#c3c3c3;font-size:13px;line-height:1.5;";
+    p.textContent = d;
+    tx.appendChild(h);
+    tx.appendChild(p);
+    row.appendChild(i);
+    row.appendChild(tx);
+    wrap.appendChild(row);
+  });
+  const last = wrap.lastChild;
+  if (last) last.style.marginBottom = "0";
+  StaffUI.alert(
+    "How invites work",
+    wrap,
+    '<i class="fas fa-circle-question"></i>',
+  );
+}
+
 function openLeaderboard() {
   ensureLeaderboardStyles();
   if (lbOverlay) closeLeaderboard();
@@ -2153,12 +2215,18 @@ function openLeaderboard() {
   const title = document.createElement("div");
   title.className = "lb-title";
   title.innerHTML = '<i class="fas fa-trophy"></i> Leaderboard';
+  const how = document.createElement("button");
+  how.className = "lb-howbtn";
+  how.innerHTML =
+    '<i class="fas fa-circle-question"></i> <span>How it works</span>';
+  how.addEventListener("click", openInviteHelp);
   const x = document.createElement("button");
   x.className = "lb-x";
   x.setAttribute("aria-label", "Close");
   x.textContent = "×";
   x.addEventListener("click", closeLeaderboard);
   head.appendChild(title);
+  head.appendChild(how);
   head.appendChild(x);
   card.appendChild(head);
 
@@ -2209,70 +2277,76 @@ socket.on("leaderboard data", (d) => {
 function ensureLeaderboardStyles() {
   if (document.getElementById("tk-lb-styles")) return;
   const css = [
-    ".lb-overlay{position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.72);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:20px;}",
-    ".lb-card{width:100%;max-width:760px;max-height:88vh;display:flex;flex-direction:column;background:#121317;border:1px solid #2c2f37;border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.6);overflow:hidden;}",
-    ".lb-head{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid #23262e;}",
-    ".lb-title{flex:1;font-size:19px;font-weight:700;color:#fff;}",
-    ".lb-title i{color:#ff9800;margin-right:8px;}",
-    ".lb-x{background:none;border:none;color:#9aa0aa;font-size:26px;line-height:1;cursor:pointer;padding:0 6px;}",
-    ".lb-x:hover{color:#fff;}",
-    ".lb-tabs{display:flex;gap:4px;padding:0 20px;border-bottom:1px solid #23262e;}",
-    ".lb-tab{background:none;border:none;border-bottom:2px solid transparent;color:#9aa0aa;font-size:14px;font-weight:600;padding:12px 14px;cursor:pointer;}",
-    ".lb-tab:hover{color:#cfd3da;}",
+    ".lb-overlay{position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.78);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:20px;}",
+    ".lb-card{width:100%;max-width:780px;max-height:90vh;display:flex;flex-direction:column;background:#202020;border:1px solid #616161;border-radius:8px;box-shadow:0 18px 60px rgba(0,0,0,.6);overflow:hidden;font-family:talkoSS,Arial,sans-serif;color:#fff;}",
+    ".lb-head{position:relative;display:flex;align-items:center;gap:12px;padding:18px 20px;border-bottom:1px solid #616161;background:linear-gradient(to bottom,#616161,#303030);}",
+    ".lb-title{flex:1;font-size:22px;font-weight:bold;color:#ff9800;display:flex;align-items:center;gap:10px;}",
+    ".lb-howbtn{background:#000;border:1px solid #ff9800;color:#ff9800;border-radius:4px;padding:8px 13px;font-size:13px;font-weight:bold;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:7px;transition:all .2s ease;}",
+    ".lb-howbtn:hover{background:#ff9800;color:#000;}",
+    ".lb-x{background:rgba(0,0,0,.25);border:none;color:#fff;font-size:23px;line-height:1;cursor:pointer;width:34px;height:34px;border-radius:4px;display:flex;align-items:center;justify-content:center;transition:all .2s ease;}",
+    ".lb-x:hover{color:#000;background:#ff9800;}",
+    ".lb-tabs{display:flex;gap:4px;padding:0 20px;border-bottom:1px solid #616161;background:#202020;}",
+    ".lb-tab{background:none;border:none;border-bottom:2px solid transparent;color:#c3c3c3;font-size:14px;font-weight:bold;padding:14px 16px;cursor:pointer;font-family:inherit;}",
+    ".lb-tab:hover{color:#fff;}",
     ".lb-tab.active{color:#ff9800;border-bottom-color:#ff9800;}",
     ".lb-content{flex:1;overflow-y:auto;padding:20px;}",
-    ".lb-foot{padding:10px 20px;border-top:1px solid #23262e;text-align:center;color:#7f8794;font-size:12px;}",
-    "@media (max-width:560px){.lb-overlay{padding:0;}.lb-card{max-width:100%;width:100%;height:100%;max-height:100%;border-radius:0;}}",
-    ".tk-lb-hero{background:#0e0f12;border:1px solid #23262e;border-radius:10px;padding:14px;margin-bottom:14px;}",
-    ".tk-lb-hero h4{margin:0 0 8px;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:#9aa0aa;}",
+    ".lb-foot{padding:11px 20px;border-top:1px solid #616161;text-align:center;color:#8d8d8d;font-size:12px;}",
+    "@media (max-width:560px){.lb-overlay{padding:0;}.lb-card{max-width:100%;width:100%;height:100%;max-height:100%;border-radius:0;}.lb-howbtn span{display:none;}.lb-howbtn{padding:8px 10px;}}",
+    ".tk-lb-hero{background:#000;border:1px solid #616161;border-radius:8px;padding:16px;margin-bottom:16px;}",
+    ".tk-lb-hero h4{margin:0 0 10px;font-size:12px;letter-spacing:.6px;text-transform:uppercase;color:#ff9800;}",
     ".tk-lb-linkrow{display:flex;gap:8px;}",
-    ".tk-lb-link{flex:1;min-width:0;background:#000;border:1px solid #2c2f37;border-radius:7px;color:#ffce85;font-family:monospace;font-size:13px;padding:9px 10px;}",
-    ".tk-lb-copy{background:#ff9800;color:#1a1206;border:none;border-radius:7px;font-weight:700;padding:0 16px;cursor:pointer;}",
-    ".tk-lb-copy:hover{background:#ffa726;}",
-    ".tk-lb-note{margin-top:8px;font-size:11.5px;color:#9aa0aa;}",
-    ".tk-lb-chips{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;}",
-    ".tk-lb-chip{flex:1;min-width:90px;background:#15161a;border:1px solid #23262e;border-radius:9px;padding:10px;text-align:center;}",
-    ".tk-lb-chip b{display:block;font-size:22px;color:#ff9800;line-height:1.15;}",
-    ".tk-lb-chip span{font-size:10.5px;color:#9aa0aa;text-transform:uppercase;letter-spacing:.5px;}",
-    ".tk-lb-goal{margin-bottom:10px;}",
-    ".tk-lb-goal .gl{display:flex;justify-content:space-between;font-size:12.5px;color:#cfd3da;margin-bottom:4px;}",
-    ".tk-lb-bar{height:8px;background:#23262e;border-radius:6px;overflow:hidden;}",
+    ".tk-lb-link{flex:1;min-width:0;background:#000;border:1px solid #616161;border-radius:4px;color:#ffce85;font-family:'Courier New',monospace;font-size:13px;padding:10px 11px;}",
+    ".tk-lb-copy{background:#ff9800;color:#000;border:none;border-radius:4px;font-weight:bold;padding:0 18px;cursor:pointer;font-family:inherit;font-size:14px;transition:all .2s ease;}",
+    ".tk-lb-copy:hover{background:#ffad33;}",
+    ".tk-lb-note{margin-top:10px;font-size:12px;color:#c3c3c3;line-height:1.5;}",
+    ".tk-lb-chips{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;}",
+    ".tk-lb-chip{flex:1;min-width:100px;background:#000;border:1px solid #616161;border-radius:8px;padding:14px 10px;text-align:center;}",
+    ".tk-lb-chip b{display:block;font-size:26px;color:#ff9800;line-height:1.15;font-weight:bold;}",
+    ".tk-lb-chip span{font-size:11px;color:#c3c3c3;text-transform:uppercase;letter-spacing:.5px;}",
+    ".tk-lb-goal{margin-bottom:12px;}",
+    ".tk-lb-goal .gl{display:flex;justify-content:space-between;font-size:13px;color:#fff;margin-bottom:5px;}",
+    ".tk-lb-goal .gl b{color:#ff9800;font-weight:bold;}",
+    ".tk-lb-bar{height:9px;background:#000;border:1px solid #616161;border-radius:6px;overflow:hidden;}",
     ".tk-lb-bar i{display:block;height:100%;background:linear-gradient(90deg,#ff9800,#ffce85);}",
-    ".tk-lb-sec{margin-top:16px;}",
-    ".tk-lb-sec h4{margin:0 0 8px;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:#9aa0aa;}",
-    ".tk-lb-list{max-height:200px;overflow:auto;border:1px solid #23262e;border-radius:9px;}",
-    ".tk-lb-row{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid #1c1f26;font-size:13px;}",
+    ".tk-lb-sec{margin-top:18px;}",
+    ".tk-lb-sec h4{margin:0 0 10px;font-size:12px;letter-spacing:.6px;text-transform:uppercase;color:#ff9800;}",
+    ".tk-lb-list{max-height:230px;overflow:auto;border:1px solid #616161;border-radius:8px;}",
+    ".tk-lb-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 13px;border-bottom:1px solid #333;font-size:14px;background:#000;}",
     ".tk-lb-row:last-child{border-bottom:none;}",
-    ".tk-lb-rank{color:#9aa0aa;width:34px;display:inline-block;}",
-    ".tk-lb-pill{font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;letter-spacing:.3px;}",
-    ".tk-lb-pill.active{background:#1f6f43;color:#d8ffe9;}",
-    ".tk-lb-pill.pending{background:#3a3f4a;color:#cfd3da;}",
-    ".tk-lb-empty{padding:14px;color:#9aa0aa;font-size:13px;text-align:center;}",
-    ".tk-lb-tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid #23262e;}",
-    ".tk-lb-tab{background:none;border:none;border-bottom:2px solid transparent;color:#9aa0aa;font-size:13px;font-weight:600;padding:8px 12px;cursor:pointer;}",
-    ".tk-lb-tab.active{color:#ff9800;border-bottom-color:#ff9800;}",
-    ".tk-lb-board{border:1px solid #23262e;border-radius:9px;overflow:hidden;}",
-    ".tk-lb-brow{display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid #1c1f26;font-size:14px;}",
+    ".tk-lb-pill{font-size:10px;font-weight:bold;padding:3px 9px;border-radius:20px;letter-spacing:.3px;white-space:nowrap;}",
+    ".tk-lb-pill.active{background:rgba(87,217,163,.16);color:#57d9a3;}",
+    ".tk-lb-pill.pending{background:#333;color:#c3c3c3;}",
+    ".tk-lb-empty{padding:34px 16px;color:#c3c3c3;font-size:14px;text-align:center;line-height:1.6;}",
+    ".tk-lb-empty i{display:block;font-size:32px;color:#616161;margin-bottom:14px;}",
+    ".tk-lb-board{border:1px solid #616161;border-radius:8px;overflow:hidden;}",
+    ".tk-lb-brow{display:flex;align-items:center;gap:12px;padding:11px 14px;border-bottom:1px solid #333;font-size:14px;background:#000;}",
     ".tk-lb-brow:last-child{border-bottom:none;}",
-    ".tk-lb-brow.top1{background:rgba(255,193,7,.08);}",
-    ".tk-lb-brow.top2{background:rgba(192,192,192,.06);}",
-    ".tk-lb-brow.top3{background:rgba(205,127,50,.07);}",
-    ".tk-lb-rankcell{width:30px;flex:0 0 auto;text-align:center;color:#9aa0aa;font-weight:700;}",
-    ".tk-lb-trophy{height:22px;width:auto;vertical-align:middle;}",
-    ".tk-lb-rankmedal{font-weight:800;}",
+    ".tk-lb-brow.top1{background:rgba(255,193,7,.10);}",
+    ".tk-lb-brow.top2{background:rgba(192,192,192,.08);}",
+    ".tk-lb-brow.top3{background:rgba(205,127,50,.09);}",
+    ".tk-lb-brow.mine{box-shadow:inset 3px 0 0 #ff9800;background:rgba(255,152,0,.09);}",
+    ".tk-lb-rankcell{width:32px;flex:0 0 auto;text-align:center;color:#8d8d8d;font-weight:bold;}",
+    ".tk-lb-trophy{height:24px;width:auto;vertical-align:middle;}",
+    ".tk-lb-rankmedal{font-weight:bold;}",
     ".tk-lb-rankmedal.m1{color:#ffce3a;}.tk-lb-rankmedal.m2{color:#cfd2d6;}.tk-lb-rankmedal.m3{color:#e08a4b;}",
     ".tk-lb-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
-    ".tk-lb-uname{color:#fff;font-weight:600;}",
+    ".tk-lb-uname{color:#fff;font-weight:bold;}",
     ".tk-lb-brow.top1 .tk-lb-uname{color:#ffce3a;}",
     ".tk-lb-brow.top2 .tk-lb-uname{color:#dfe3e8;}",
     ".tk-lb-brow.top3 .tk-lb-uname{color:#e8a36a;}",
-    ".tk-lb-uloc{color:#7f8794;font-size:12px;}",
-    ".tk-lb-total{flex:0 0 auto;color:#ff9800;font-weight:700;}",
-    ".tk-lb-pag{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:12px;}",
-    ".tk-lb-pbtn{background:#15161a;border:1px solid #2c2f37;color:#cfd3da;border-radius:7px;padding:6px 14px;cursor:pointer;font-size:13px;}",
+    ".tk-lb-uloc{color:#8d8d8d;font-size:12px;}",
+    ".tk-lb-youtag{font-size:10px;font-weight:bold;background:#ff9800;color:#000;border-radius:4px;padding:1px 6px;margin-left:7px;letter-spacing:.4px;vertical-align:middle;}",
+    ".tk-lb-counts{flex:0 0 auto;display:flex;align-items:center;gap:8px;}",
+    ".tk-lb-active{color:#ff9800;font-weight:bold;font-size:14px;white-space:nowrap;}",
+    ".tk-lb-pending{font-size:11px;font-weight:bold;background:#333;color:#c3c3c3;border-radius:20px;padding:3px 9px;white-space:nowrap;}",
+    ".tk-lb-pag{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:14px;}",
+    ".tk-lb-pbtn{background:#000;border:1px solid #616161;color:#fff;border-radius:4px;padding:8px 16px;cursor:pointer;font-size:13px;font-weight:bold;font-family:inherit;transition:all .2s ease;}",
+    ".tk-lb-pbtn:hover:not(:disabled){border-color:#ff9800;color:#ff9800;}",
     ".tk-lb-pbtn:disabled{opacity:.4;cursor:default;}",
-    ".tk-lb-pinfo{color:#9aa0aa;font-size:12.5px;}",
-    ".tk-lb-foot{margin-top:12px;text-align:center;color:#7f8794;font-size:11.5px;}",
+    ".tk-lb-pinfo{color:#c3c3c3;font-size:13px;}",
+    ".tk-lb-legend{margin-top:14px;text-align:center;color:#8d8d8d;font-size:12px;line-height:1.6;}",
+    ".tk-lb-standing{margin-top:14px;background:#000;border:1px solid #ff9800;border-radius:8px;padding:13px 15px;font-size:13.5px;color:#fff;text-align:center;}",
+    ".tk-lb-standing b{color:#ff9800;}",
   ].join("");
   const tag = document.createElement("style");
   tag.id = "tk-lb-styles";
@@ -2300,8 +2374,14 @@ function renderLbGlobal(content) {
   if (!top.length) {
     const e = document.createElement("div");
     e.className = "tk-lb-empty";
-    e.textContent =
-      "No invites credited yet. Be the first to invite an active member!";
+    const i = document.createElement("i");
+    i.className = "fas fa-trophy";
+    e.appendChild(i);
+    e.appendChild(
+      document.createTextNode(
+        "No invites yet. Open the Your invites tab, share your link, and you'll be the first on the board.",
+      ),
+    );
     content.appendChild(e);
     return;
   }
@@ -2314,12 +2394,18 @@ function renderLbGlobal(content) {
   board.className = "tk-lb-board";
   slice.forEach((row, idx) => {
     const rank = start + idx + 1;
+    const active = row.active || 0;
+    const pending = row.pending || 0;
+    // Trophies are earned by active invites only, so a top-3 row that has no
+    // active invites yet shows a plain number rather than a medal.
+    const medal = rank <= 3 && active > 0;
     const r = document.createElement("div");
-    r.className = "tk-lb-brow" + (rank <= 3 ? " top" + rank : "");
+    r.className =
+      "tk-lb-brow" + (medal ? " top" + rank : "") + (row.mine ? " mine" : "");
 
     const rc = document.createElement("span");
     rc.className = "tk-lb-rankcell";
-    if (rank <= 3) {
+    if (medal) {
       const img = document.createElement("img");
       img.src = TROPHY_SRC[rank];
       img.alt = "#" + rank;
@@ -2348,16 +2434,57 @@ function renderLbGlobal(content) {
       loc.textContent = " / " + row.location;
       name.appendChild(loc);
     }
+    if (row.mine) {
+      const youTag = document.createElement("span");
+      youTag.className = "tk-lb-youtag";
+      youTag.textContent = "YOU";
+      name.appendChild(youTag);
+    }
     r.appendChild(name);
 
-    const total = document.createElement("span");
-    total.className = "tk-lb-total";
-    total.textContent = String(row.credited);
-    r.appendChild(total);
+    const counts = document.createElement("span");
+    counts.className = "tk-lb-counts";
+    const act = document.createElement("span");
+    act.className = "tk-lb-active";
+    act.textContent = active + (active === 1 ? " active" : " active");
+    act.title = "Active invites: friends who joined and became members";
+    counts.appendChild(act);
+    if (pending > 0) {
+      const pend = document.createElement("span");
+      pend.className = "tk-lb-pending";
+      pend.textContent = "+" + pending + " pending";
+      pend.title = "Invited, not active members yet";
+      counts.appendChild(pend);
+    }
+    r.appendChild(counts);
 
     board.appendChild(r);
   });
   content.appendChild(board);
+
+  // Reassure the viewer where they stand even if they are on another page.
+  const you = lbData.you;
+  if (you && (you.invitedTotal || 0) > 0) {
+    const act = you.credited || 0;
+    const pend = Math.max(0, (you.invitedTotal || 0) - act);
+    const st = document.createElement("div");
+    st.className = "tk-lb-standing";
+    st.innerHTML =
+      "You're <b>#" +
+      (you.rank || "-") +
+      "</b> with <b>" +
+      act +
+      "</b> active and <b>" +
+      pend +
+      "</b> pending. Keep sharing your link to climb.";
+    content.appendChild(st);
+  }
+
+  const legend = document.createElement("div");
+  legend.className = "tk-lb-legend";
+  legend.textContent =
+    "Active = friends who joined and became members. Pending = invited but not active yet. Trophies go to the top inviters by active invites.";
+  content.appendChild(legend);
 
   if (pages > 1) {
     const pag = document.createElement("div");
@@ -2369,7 +2496,7 @@ function renderLbGlobal(content) {
     prev.addEventListener("click", () => {
       if (lbPage > 0) {
         lbPage--;
-        renderLbBody();
+        renderLbContent();
       }
     });
     const info = document.createElement("span");
@@ -2382,7 +2509,7 @@ function renderLbGlobal(content) {
     next.addEventListener("click", () => {
       if (lbPage < pages - 1) {
         lbPage++;
-        renderLbBody();
+        renderLbContent();
       }
     });
     pag.appendChild(prev);
@@ -2431,7 +2558,7 @@ function renderLbInvites(content) {
     const note = document.createElement("div");
     note.className = "tk-lb-note";
     note.textContent =
-      "An invite counts once your friend becomes an active member (a few days of real chatting).";
+      "When a friend opens Talkomatic from your link they become a pending invite. It turns active once they stick around and become a member (a few days of real chatting, on their own connection).";
     hero.appendChild(note);
     content.appendChild(hero);
   }
@@ -2450,8 +2577,8 @@ function renderLbInvites(content) {
     return c;
   };
   chips.appendChild(chip(credited, "Active invites"));
-  chips.appendChild(chip(you.rank ? "#" + you.rank : "-", "Your rank"));
   chips.appendChild(chip(pending, "Pending"));
+  chips.appendChild(chip(you.rank ? "#" + you.rank : "-", "Your rank"));
   content.appendChild(chips);
 
   const goal = (label, have, need) => {
