@@ -1782,6 +1782,14 @@ socket.on("dev vanish status", (data) => {
 
 socket.on("dev hide status", (data) => {
   currentUserIsHidden = !!data?.isHidden;
+  // Persist the choice so it survives refreshes and restarts: it is re-applied
+  // on every room join below (the server session alone loses it on a restart).
+  try {
+    localStorage.setItem(
+      "talkomatic_devHidden",
+      currentUserIsHidden ? "1" : "0",
+    );
+  } catch (_) {}
   const button = document.getElementById("devHideToggle");
   updateDevHideButton(button);
   setStaffItemLabel(
@@ -2434,6 +2442,19 @@ socket.on("room joined", (data) => {
     if (savedColor) {
       socket.emit("dev set color", { color: savedColor });
       applyDevColor(savedColor);
+    }
+  }
+
+  // Re-apply the saved hide-flair preference for staff (dev or mod). The server
+  // restores it from the session when it can, but a restart wipes the session,
+  // so we re-assert from localStorage on every join. The server confirms via
+  // "dev hide status", which fixes the row, button, and re-saves the choice.
+  if (currentUserIsDev || currentUserIsMod) {
+    const savedHidden = localStorage.getItem("talkomatic_devHidden");
+    if (savedHidden === "1" && !currentUserIsHidden) {
+      socket.emit("dev set hide", { isHidden: true });
+    } else if (savedHidden === "0" && currentUserIsHidden) {
+      socket.emit("dev set hide", { isHidden: false });
     }
   }
 
