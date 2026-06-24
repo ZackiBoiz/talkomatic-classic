@@ -164,6 +164,69 @@ function sanitizeGradient(g) {
   return out.length >= 2 ? out : null;
 }
 
+// ── Multiplayer Piano: Server-Side Room State (ephemeral) ───────────────────
+// One shared 88-key piano per room. We keep only presence/ownership/moderation
+// here - individual notes are relayed live and never stored. Mirrors the board:
+// trust nothing from the client, validate every action by the session userId.
+
+const pianoState = new Map(); // roomId → { crown, onlyOwner, muted:Set, open:Set }
+
+// Per-message / per-second flood caps. A human chord is a handful of events in a
+// flush window; anything past these is black-MIDI spam and gets dropped.
+const PIANO_MIN_KEY = 0;
+const PIANO_MAX_KEY = 87;
+const PIANO_MAX_NOTES_PER_MSG = 24;
+const PIANO_MAX_NOTES_PER_SEC = 160;
+const PIANO_MAX_MSGS_PER_SEC = 30;
+
+function getPianoState(roomId) {
+  if (!pianoState.has(roomId)) {
+    pianoState.set(roomId, {
+      crown: null,
+      onlyOwner: false,
+      muted: new Set(),
+      open: new Set(),
+    });
+  }
+  return pianoState.get(roomId);
+}
+
+function cleanupPianoState(roomId) {
+  pianoState.delete(roomId);
+}
+
+// Public crown/lock snapshot for clients (resolves the holder's name).
+function pianoMeta(roomId) {
+  const ps = pianoState.get(roomId);
+  if (!ps) return { crown: null, crownName: null, onlyOwner: false };
+  let crownName = null;
+  if (ps.crown) {
+    const room = state.rooms.get(roomId);
+    const u = room && room.users.find((x) => x.id === ps.crown);
+    crownName = u ? u.username : null;
+  }
+  return { crown: ps.crown, crownName, onlyOwner: ps.onlyOwner };
+}
+
+// Drop a user's piano presence (modal close, leave, disconnect, ghost). Frees a
+// stuck "only owner" lock if the crown holder vanishes. Mute only clears on a
+// full room exit so a troll can't reopen the panel to unmute themselves.
+function pianoDropPresence(roomId, userId, clearMute) {
+  const ps = pianoState.get(roomId);
+  if (!ps) return;
+  if (clearMute) ps.muted.delete(userId);
+  const wasOpen = ps.open.delete(userId);
+  let crownChanged = false;
+  if (ps.crown === userId) {
+    ps.crown = null;
+    ps.onlyOwner = false;
+    crownChanged = true;
+  }
+  if (!io()) return;
+  if (wasOpen) io().to(roomId).emit("piano user status", { userId, open: false });
+  if (crownChanged) io().to(roomId).emit("piano crown", pianoMeta(roomId));
+}
+
 // ── User Counting ───────────────────────────────────────────────────────────
 
 function getUserRoomsCount(userId) {
@@ -1384,6 +1447,7 @@ async function leaveRoom(socket, userId) {
     clearAFKTimers(userId);
 
     finalizeBoardUserStroke(roomId, userId);
+    pianoDropPresence(roomId, userId, true);
 
     const room = state.rooms.get(roomId);
     if (room) {
@@ -2251,6 +2315,250 @@ function registerSocketHandlers() {
         io().to(socket.roomId).emit("board clear");
         const room = state.rooms.get(socket.roomId);
         logStaff(socket, "clear board", null, room);
+      }),
+    );
+
+    // ── Multiplayer Piano: presence, notes, cursor, chat, crown, mute ───
+    // Every handler proves identity from the session (never the payload),
+    // scopes to socket.roomId, and re-validates ownership/lock/mute server-side.
+
+    socket.on(
+      "piano open",
+      safe(async () => {
+        if (!socket.roomId || !socket.handshake.session?.userId) return;
+        if (socket.spectating) return; // spectators are read-only
+        const userId = socket.handshake.session.userId;
+        socket.pianoOpen = true;
+        clearAFKTimers(userId);
+
+        const ps = getPianoState(socket.roomId);
+        ps.open.add(userId);
+
+        // Tell the newcomer who is already at the piano + the crown/mute state.
+        const room = state.rooms.get(socket.roomId);
+        const participants = [];
+        for (const uid of ps.open) {
+          if (uid === userId) continue;
+          const u = room && room.users.find((x) => x.id === uid);
+          participants.push({ userId: uid, username: u ? u.username : "User" });
+        }
+        socket.emit("piano participants", { participants });
+        socket.emit("piano crown", pianoMeta(socket.roomId));
+        socket.emit("piano muted", { muted: Array.from(ps.muted) });
+
+        // Announce the newcomer to everyone else.
+        socket.to(socket.roomId).emit("piano user status", {
+          userId,
+          username: socket.handshake.session.username || "Anonymous",
+          open: true,
+        });
+      }),
+    );
+
+    socket.on(
+      "piano close",
+      safe(async () => {
+        if (!socket.roomId || !socket.handshake.session?.userId) return;
+        const userId = socket.handshake.session.userId;
+        socket.pianoOpen = false;
+        setupAFKTimers(socket, userId);
+        // Keep mute across a close so it can't be self-cleared.
+        pianoDropPresence(socket.roomId, userId, false);
+      }),
+    );
+
+    socket.on(
+      "piano notes",
+      safe(async (data) => {
+        if (!socket.roomId || !socket.handshake.session?.userId) return;
+        if (socket.spectating) return;
+        const userId = socket.handshake.session.userId;
+        if (!data || !Array.isArray(data.notes) || data.notes.length === 0)
+          return;
+
+        const ps = getPianoState(socket.roomId);
+        if (ps.muted.has(userId)) return; // staff-muted: silenced server-side
+
+        // "Only owner can play": only the crown holder or staff may sound notes.
+        const isStaff = !!(socket.isDev || socket.isMod);
+        if (ps.onlyOwner && ps.crown !== userId && !isStaff) return;
+
+        // Inline per-second flood guard (no async work per note; mirrors how the
+        // board clamps points). A new 1s window resets the counters.
+        const now = Date.now();
+        if (!socket._pianoWin || now - socket._pianoWin.t >= 1000) {
+          socket._pianoWin = { t: now, notes: 0, msgs: 0 };
+        }
+        const win = socket._pianoWin;
+        if (++win.msgs > PIANO_MAX_MSGS_PER_SEC) return;
+
+        const clean = [];
+        for (const ev of data.notes) {
+          if (!ev || typeof ev.n !== "number") continue;
+          const n = ev.n | 0;
+          if (n < PIANO_MIN_KEY || n > PIANO_MAX_KEY) continue;
+          if (++win.notes > PIANO_MAX_NOTES_PER_SEC) break;
+
+          const out = { n };
+          if (ev.s === 1) {
+            out.s = 1; // note off
+          } else {
+            let v = typeof ev.v === "number" ? ev.v : 0.6;
+            if (!(v > 0)) v = 0.6;
+            if (v > 1) v = 1;
+            out.v = Math.round(v * 1000) / 1000;
+          }
+          let d = typeof ev.d === "number" ? ev.d : 0;
+          if (!(d >= 0)) d = 0;
+          if (d > 250) d = 250;
+          out.d = d | 0;
+
+          clean.push(out);
+          if (clean.length >= PIANO_MAX_NOTES_PER_MSG) break;
+        }
+        if (clean.length === 0) return;
+
+        socket.to(socket.roomId).emit("piano notes", { userId, notes: clean });
+      }),
+    );
+
+    socket.on(
+      "piano cursor",
+      safe(async (data) => {
+        if (!socket.roomId || !socket.handshake.session?.userId) return;
+        if (socket.spectating) return;
+        if (typeof data?.x !== "number" || typeof data?.y !== "number") return;
+        // x,y are fractions (0..1) of the keyboard area, resolution-independent.
+        const x = Math.max(0, Math.min(1, data.x));
+        const y = Math.max(0, Math.min(1, data.y));
+        socket.to(socket.roomId).emit("piano cursor", {
+          userId: socket.handshake.session.userId,
+          username: socket.handshake.session.username || "Anonymous",
+          x,
+          y,
+        });
+      }),
+    );
+
+    socket.on(
+      "piano chat",
+      safe(async (data) => {
+        if (!socket.roomId || !socket.handshake.session?.userId) return;
+        if (socket.spectating) return;
+        if (!data?.text || typeof data.text !== "string") return;
+        const text = sanitizeMessage(data.text).slice(0, 200);
+        if (!text.trim()) return;
+        // Relay raw; each client applies its own word filter on display, matching
+        // the room's per-viewer automod toggle.
+        io()
+          .to(socket.roomId)
+          .emit("piano chat", {
+            userId: socket.handshake.session.userId,
+            username: socket.handshake.session.username || "Anonymous",
+            text,
+            timestamp: Date.now(),
+          });
+      }),
+    );
+
+    // Claim the crown if it is free, the holder has left, or you are staff.
+    socket.on(
+      "piano crown claim",
+      safe(async () => {
+        if (!socket.roomId || !socket.handshake.session?.userId) return;
+        if (socket.spectating) return;
+        const userId = socket.handshake.session.userId;
+        const ps = getPianoState(socket.roomId);
+        const room = state.rooms.get(socket.roomId);
+        const holderPresent =
+          ps.crown && room && room.users.some((u) => u.id === ps.crown);
+        const isStaff = !!(socket.isDev || socket.isMod);
+        if (ps.crown && holderPresent && ps.crown !== userId && !isStaff) {
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.FORBIDDEN,
+              "Someone already has the crown.",
+            ),
+          );
+        }
+        ps.crown = userId;
+        io().to(socket.roomId).emit("piano crown", pianoMeta(socket.roomId));
+      }),
+    );
+
+    // Drop the crown (holder or staff). Clears any "only owner" lock with it.
+    socket.on(
+      "piano crown drop",
+      safe(async () => {
+        if (!socket.roomId || !socket.handshake.session?.userId) return;
+        const userId = socket.handshake.session.userId;
+        const ps = getPianoState(socket.roomId);
+        const isStaff = !!(socket.isDev || socket.isMod);
+        if (ps.crown !== userId && !isStaff) return;
+        ps.crown = null;
+        ps.onlyOwner = false;
+        io().to(socket.roomId).emit("piano crown", pianoMeta(socket.roomId));
+      }),
+    );
+
+    // Toggle "only owner can play" (crown holder or staff only).
+    socket.on(
+      "piano set lock",
+      safe(async (data) => {
+        if (!socket.roomId || !socket.handshake.session?.userId) return;
+        const userId = socket.handshake.session.userId;
+        const ps = getPianoState(socket.roomId);
+        const isStaff = !!(socket.isDev || socket.isMod);
+        if (ps.crown !== userId && !isStaff) return;
+        ps.onlyOwner = !!(data && data.onlyOwner);
+        io().to(socket.roomId).emit("piano crown", pianoMeta(socket.roomId));
+      }),
+    );
+
+    // Staff-only: silence a user's notes. Mirrors "staff kick" hierarchy.
+    socket.on(
+      "piano mute user",
+      safe(async (data) => {
+        if (!requireStaff(socket)) return;
+        const targetUserId = data?.targetUserId;
+        if (!targetUserId || typeof targetUserId !== "string")
+          return socket.emit(
+            "error",
+            createErrorResponse(ERROR_CODES.BAD_REQUEST, "targetUserId required."),
+          );
+        if (!canActOn(socket, targetUserId))
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.FORBIDDEN,
+              "You cannot act on this user.",
+            ),
+          );
+        const roomId = getUserCurrentRoom(targetUserId);
+        const room = roomId ? state.rooms.get(roomId) : null;
+        if (!room)
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.NOT_FOUND,
+              "User not found in any room.",
+            ),
+          );
+        const ps = getPianoState(roomId);
+        const mute = data.mute !== false;
+        if (mute) ps.muted.add(targetUserId);
+        else ps.muted.delete(targetUserId);
+        io().to(roomId).emit("piano muted", { muted: Array.from(ps.muted) });
+        const targetUser = room.users.find((u) => u.id === targetUserId);
+        logStaff(socket, mute ? "piano mute" : "piano unmute", targetUser, room);
+        socket.emit("staff action result", {
+          action: "piano mute",
+          ok: true,
+          targetUserId,
+          mute,
+          roomId,
+        });
       }),
     );
 
@@ -5063,6 +5371,9 @@ function startCleanupIntervals() {
     for (const roomId of boardState.keys()) {
       if (!state.rooms.has(roomId)) boardState.delete(roomId);
     }
+    for (const roomId of pianoState.keys()) {
+      if (!state.rooms.has(roomId)) pianoState.delete(roomId);
+    }
   }, 180000);
 
   // Empty room cleanup (10 min)
@@ -5081,6 +5392,7 @@ function startCleanupIntervals() {
       state.roomSoloSince.delete(id);
       state.roomLastChatActivity.delete(id);
       cleanupBoardState(id);
+      cleanupPianoState(id);
       if (state.roomDeletionTimers.has(id)) {
         clearTimeout(state.roomDeletionTimers.get(id));
         state.roomDeletionTimers.delete(id);
@@ -5112,6 +5424,7 @@ function startCleanupIntervals() {
           clearAFKTimers(u.id);
           state.devUsers.delete(u.id);
           finalizeBoardUserStroke(roomId, u.id);
+          pianoDropPresence(roomId, u.id, true);
           if (state.typingTimeouts.has(u.id)) {
             clearTimeout(state.typingTimeouts.get(u.id));
             state.typingTimeouts.delete(u.id);

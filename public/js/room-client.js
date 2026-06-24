@@ -32,6 +32,7 @@ let currentRoomName = "";
 let lastSentMessage = "";
 let chatInput = null;
 let talkoboardInstance = null;
+let pianoInstance = null;
 
 // Dev mode state
 let currentUserIsDev = false;
@@ -938,6 +939,16 @@ const APPS_DATA = {
     openInNewTab: false,
     action: "talkoboard",
   },
+  piano: {
+    name: "Multiplayer Piano",
+    description: "Play piano together in real-time",
+    icon: "🎹",
+    iconClass: "placeholder",
+    status: "available",
+    url: null,
+    openInNewTab: false,
+    action: "piano",
+  },
   minigames: {
     name: "Mini Games",
     description: "Uno, Hangman, Tic Tac Toe & more",
@@ -1007,6 +1018,8 @@ function createAppDirectoryDropdown() {
         hideAppDirectory();
         if (app.action === "talkoboard") {
           openTalkoboard();
+        } else if (app.action === "piano") {
+          openPiano();
         } else if (app.openInNewTab) {
           window.open(app.url, "_blank", "noopener,noreferrer");
         } else {
@@ -1083,6 +1096,35 @@ function openTalkoboard() {
     talkoboardInstance = new Talkoboard(socket, currentUserId, currentUsername);
   }
   talkoboardInstance.open();
+}
+
+function openPiano() {
+  if (!currentRoomId || !currentUserId) {
+    showErrorModal("You must be in a room to use the Piano.");
+    return;
+  }
+  // If a cached page loaded before piano-client.js shipped, the class is
+  // missing - tell the user to refresh instead of silently doing nothing.
+  if (typeof Piano === "undefined") {
+    showErrorModal(
+      "The Piano is still loading. Please refresh the page and try again.",
+    );
+    return;
+  }
+  try {
+    if (!pianoInstance) {
+      pianoInstance = new Piano(socket, currentUserId, currentUsername, {
+        isDev: currentUserIsDev,
+        isMod: currentUserIsMod,
+      });
+    }
+    pianoInstance.open();
+  } catch (err) {
+    console.error("Piano failed to open:", err);
+    showErrorModal(
+      "Sorry, the Piano failed to open. Please refresh the page and try again.",
+    );
+  }
 }
 
 // ── 9. VOTING UI ────────────────────────────────────────────────────────────
