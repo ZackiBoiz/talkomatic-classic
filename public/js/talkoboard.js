@@ -1,5 +1,20 @@
-// talkoboard.js v3.1 - Collaborative whiteboard for Talkomatic
+// talkoboard.js v3.3 - Collaborative whiteboard for Talkomatic
 //
+// v3.3: Light, modern header (no longer black) and a compact single-row mobile
+//       header. Chat is now a closable panel with a send button and a launcher
+//       bubble, instead of the floating fade. Removed the dot grid. Pan/zoom are
+//       rAF-coalesced (scheduleRedraw) so they no longer jitter. Two-finger
+//       touch now pans AND pinch-zooms, and aborts an accidental stroke from the
+//       first finger. New "fit drawing to screen" button.
+// v3.2: Full-screen redesign matching the Piano. New header with a brand and
+//       modern FontAwesome tool buttons. The chat is now the Piano's floating,
+//       click-through, fade-when-idle chat (palette inverted for the white
+//       board). Remote cursors use entity interpolation: each cursor is buffered
+//       and rendered ~CURSOR_RENDER_DELAY ms in the past, linearly interpolated
+//       between the two snapshots straddling that time, and HELD (never
+//       extrapolated) on starvation. That removes the per-packet snapping the
+//       old "jump straight to the latest packet" cursor had. See
+//       talkoboard-realtime.md for the full write-up.
 // v3.1: Talkomatic palette (#202020 / #1a1a1a / #616161 / #ff9800) with
 //       FontAwesome icons. No toolbar title.
 // v3.0: Color panel (palette, custom picker, eyedropper, recents, teammates'
@@ -33,6 +48,8 @@ class Talkoboard {
     this.panStart = null;
     this.MIN_ZOOM = 0.2;
     this.MAX_ZOOM = 5;
+    this._redrawRaf = null; // rAF handle so pan/zoom redraw at most once per frame
+    this._gesturing = false; // true during a two-finger touch (pan + pinch zoom)
 
     // ── Completed strokes (for redraw on pan/zoom) ──────────────────
     this.strokes = [];
@@ -97,15 +114,25 @@ class Talkoboard {
     // ── Point simplification ────────────────────────────────────────
     this.MIN_POINT_DISTANCE_SQ = 2.25; // 1.5px squared
 
-    // ── Live cursors ────────────────────────────────────────────────
+    // ── Live cursors (entity interpolation, mirrors the piano) ──────
+    // Remote cursors are buffered and rendered ~CURSOR_RENDER_DELAY ms in the
+    // past, interpolated between the two snapshots straddling that render time,
+    // so irregular packet arrival looks smooth instead of snapping between
+    // packets. When the buffer runs out (sender paused, or a packet is late) we
+    // HOLD at the last position - never extrapolate, which is what used to
+    // overshoot and then snap back when someone stopped moving.
     this.remoteCursors = new Map();
     this.cursorThrottle = 0;
-    this.CURSOR_SEND_INTERVAL = 50;
+    this.CURSOR_SEND_INTERVAL = 45; // ms between outgoing cursor samples (~22Hz)
+    this.CURSOR_RENDER_DELAY = 80; // ms; render remote cursors slightly in the past
+    this.CURSOR_TIMEOUT = 3000; // ms with no update -> hide the cursor
+    this._cursorRaf = null;
 
-    // ── Chat ────────────────────────────────────────────────────────
-    this.chatMessages = [];
-    this.MAX_CHAT_MESSAGES = 50;
-    this.chatCollapsed = false;
+    // ── Chat (closable panel docked bottom-right) ───────────────────
+    this.chatNodes = [];
+    this.MAX_CHAT_MESSAGES = 60;
+    this.chatOpen = false;
+    this.chatUnread = 0;
 
     // ── Chat rate limiting ──────────────────────────────────────────
     this.chatTimestamps = [];
@@ -173,8 +200,7 @@ class Talkoboard {
     span.className = "tb-chat-text";
     span.textContent = text;
     msg.appendChild(span);
-    this.chatLog.appendChild(msg);
-    this.chatLog.scrollTop = this.chatLog.scrollHeight;
+    this._appendChat(msg);
 
     setTimeout(() => {
       this.chatCooldownActive = false;
@@ -343,15 +369,24 @@ class Talkoboard {
     const zoomReset = this.makeBtn(
       "tb-tool-btn tb-icon-btn",
       '<i class="fas fa-expand"></i>',
-      "Reset view",
+      "Reset view (100%)",
+    );
+    // Fit the whole drawing into view - handy on an infinite canvas after you
+    // have panned or zoomed away from your strokes.
+    const fitBtn = this.makeBtn(
+      "tb-tool-btn tb-icon-btn",
+      '<i class="fas fa-arrows-to-dot"></i>',
+      "Fit drawing to screen",
     );
     zoomOut.addEventListener("click", () => this.adjustZoom(-0.15));
     zoomIn.addEventListener("click", () => this.adjustZoom(0.15));
     zoomReset.addEventListener("click", () => this.resetView());
+    fitBtn.addEventListener("click", () => this.fitToView());
     zoomWrap.appendChild(zoomOut);
     zoomWrap.appendChild(this.zoomLabel);
     zoomWrap.appendChild(zoomIn);
     zoomWrap.appendChild(zoomReset);
+    zoomWrap.appendChild(fitBtn);
 
     const closeBtn = this.makeBtn(
       "tb-close",
@@ -363,6 +398,12 @@ class Talkoboard {
     headerRight.appendChild(zoomWrap);
     headerRight.appendChild(closeBtn);
 
+    // Brand sits at the far left, matching the Piano's header.
+    const brand = document.createElement("div");
+    brand.className = "tb-brand";
+    brand.innerHTML = '<i class="fas fa-palette"></i><span>Talkoboard</span>';
+
+    header.appendChild(brand);
     header.appendChild(toolbar);
     header.appendChild(headerRight);
 
@@ -576,64 +617,99 @@ class Talkoboard {
     }
   }
 
-  // ── Chat panel ───────────────────────────────────────────────────
+  // ── Chat (closable panel, bottom-right) ──────────────────────────
+  // Default state is a small launcher bubble so the board stays fully visible.
+  // Click it to open a compact, solid panel with a send button; close it to get
+  // the whole board back. An unread dot sits on the bubble while it is closed.
   buildChat(parent) {
     const chat = document.createElement("div");
     chat.className = "tb-chat";
 
-    const chatHeader = document.createElement("div");
-    chatHeader.className = "tb-chat-header";
-    const chatTitle = document.createElement("span");
-    chatTitle.innerHTML = '<i class="fas fa-comment"></i> <span>Chat</span>';
-    this.chatToggle = document.createElement("button");
-    this.chatToggle.type = "button";
-    this.chatToggle.className = "tb-chat-toggle";
-    this.chatToggle.innerHTML = '<i class="fas fa-minus"></i>';
-    this.chatToggle.title = "Collapse chat";
-    this.chatToggle.addEventListener("click", () => this.toggleChat());
-    chatHeader.appendChild(chatTitle);
-    chatHeader.appendChild(this.chatToggle);
-    chatHeader.addEventListener("click", (e) => {
-      if (e.target === this.chatToggle) return;
-      if (this.chatCollapsed) this.toggleChat();
-    });
+    // Launcher bubble (shown while the chat is closed).
+    this.chatFab = document.createElement("button");
+    this.chatFab.type = "button";
+    this.chatFab.className = "tb-chat-fab";
+    this.chatFab.title = "Open chat";
+    this.chatFab.innerHTML =
+      '<i class="fas fa-comment-dots"></i><span class="tb-chat-badge"></span>';
+    this.chatFab.addEventListener("click", () => this.openChat());
+
+    // Panel (shown while the chat is open).
+    const panel = document.createElement("div");
+    panel.className = "tb-chat-panel";
+
+    const bar = document.createElement("div");
+    bar.className = "tb-chat-bar";
+    const title = document.createElement("span");
+    title.className = "tb-chat-title";
+    title.innerHTML = '<i class="fas fa-comment-dots"></i><span>Chat</span>';
+    const closeChatBtn = document.createElement("button");
+    closeChatBtn.type = "button";
+    closeChatBtn.className = "tb-chat-close-btn";
+    closeChatBtn.title = "Hide chat";
+    closeChatBtn.innerHTML = '<i class="fas fa-xmark"></i>';
+    closeChatBtn.addEventListener("click", () => this.closeChat());
+    bar.appendChild(title);
+    bar.appendChild(closeChatBtn);
 
     this.chatLog = document.createElement("div");
     this.chatLog.className = "tb-chat-log";
 
-    const chatInputWrap = document.createElement("div");
-    chatInputWrap.className = "tb-chat-input-wrap";
+    const inputRow = document.createElement("div");
+    inputRow.className = "tb-chat-input-row";
     this.chatInput = document.createElement("input");
     this.chatInput.type = "text";
     this.chatInput.className = "tb-chat-input";
-    this.chatInput.placeholder = "Type a message…";
+    this.chatInput.placeholder = "Say something…";
     this.chatInput.maxLength = 200;
     this.chatInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && this.chatInput.value.trim()) {
-        this.sendChat(this.chatInput.value.trim());
-        this.chatInput.value = "";
-      }
+      if (e.key === "Enter") this.submitChat();
       e.stopPropagation();
     });
-    chatInputWrap.appendChild(this.chatInput);
+    this.chatSendBtn = document.createElement("button");
+    this.chatSendBtn.type = "button";
+    this.chatSendBtn.className = "tb-chat-send";
+    this.chatSendBtn.title = "Send";
+    this.chatSendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+    this.chatSendBtn.addEventListener("click", () => this.submitChat());
+    inputRow.appendChild(this.chatInput);
+    inputRow.appendChild(this.chatSendBtn);
 
-    chat.appendChild(chatHeader);
-    chat.appendChild(this.chatLog);
-    chat.appendChild(chatInputWrap);
+    panel.appendChild(bar);
+    panel.appendChild(this.chatLog);
+    panel.appendChild(inputRow);
+
+    chat.appendChild(panel);
+    chat.appendChild(this.chatFab);
 
     this.chatEl = chat;
     parent.appendChild(chat);
   }
 
-  toggleChat() {
-    this.chatCollapsed = !this.chatCollapsed;
-    this.chatEl.classList.toggle("collapsed", this.chatCollapsed);
-    this.chatToggle.innerHTML = this.chatCollapsed
-      ? '<i class="fas fa-plus"></i>'
-      : '<i class="fas fa-minus"></i>';
-    this.chatToggle.title = this.chatCollapsed
-      ? "Expand chat"
-      : "Collapse chat";
+  submitChat() {
+    const text = this.chatInput.value.trim();
+    if (!text) return;
+    this.sendChat(text);
+    this.chatInput.value = "";
+  }
+
+  openChat() {
+    this.chatOpen = true;
+    this.chatEl.classList.add("open");
+    this.chatUnread = 0;
+    this.updateChatBadge();
+    setTimeout(() => this.chatInput && this.chatInput.focus(), 30);
+    if (this.chatLog) this.chatLog.scrollTop = this.chatLog.scrollHeight;
+  }
+
+  closeChat() {
+    this.chatOpen = false;
+    this.chatEl.classList.remove("open");
+    if (this.chatInput) this.chatInput.blur();
+  }
+
+  updateChatBadge() {
+    if (this.chatFab) this.chatFab.classList.toggle("has-unread", this.chatUnread > 0);
   }
 
   // ── Canvas event wiring (extracted from buildModal for clarity) ──
@@ -683,21 +759,25 @@ class Talkoboard {
       if (this.isPanning && this.panStart) {
         this.panX = this.panStart.px + (e.clientX - this.panStart.x);
         this.panY = this.panStart.py + (e.clientY - this.panStart.y);
-        this.redraw();
+        this.scheduleRedraw();
       }
     });
     window.addEventListener("mouseup", (e) => {
       if (e.button === 1) this.isPanning = false;
     });
 
-    // Two-finger pan on touch
-    let lastTouches = null;
+    // Two-finger navigation on touch: drag to pan, pinch to zoom (anchored on
+    // the midpoint between the fingers). The first finger may have started a
+    // stroke, so abort it - a navigation gesture should never leave a stray mark.
+    let gesture = null; // last { cx, cy, dist }
     this.canvas.addEventListener(
       "touchstart",
       (e) => {
         if (e.touches.length === 2) {
-          lastTouches = this.getTouchCenter(e.touches);
+          this._abortCurrentStroke();
+          this._gesturing = true;
           this.isPanning = true;
+          gesture = this.touchGesture(e.touches);
         }
       },
       { passive: true },
@@ -705,26 +785,42 @@ class Talkoboard {
     this.canvas.addEventListener(
       "touchmove",
       (e) => {
-        if (e.touches.length === 2 && lastTouches) {
-          const center = this.getTouchCenter(e.touches);
-          this.panX += center.x - lastTouches.x;
-          this.panY += center.y - lastTouches.y;
-          lastTouches = center;
-          this.redraw();
+        if (e.touches.length === 2 && gesture) {
+          const g = this.touchGesture(e.touches);
+          // Pan by how the midpoint moved.
+          this.panX += g.cx - gesture.cx;
+          this.panY += g.cy - gesture.cy;
+          // Zoom by how the finger spread changed, anchored on the midpoint so
+          // the board scales around the point between your fingers.
+          if (gesture.dist > 0 && g.dist > 0) {
+            const rect = this.canvas.getBoundingClientRect();
+            const ax = g.cx - rect.left,
+              ay = g.cy - rect.top;
+            const oldZoom = this.zoom;
+            const nz = Math.min(
+              this.MAX_ZOOM,
+              Math.max(this.MIN_ZOOM, oldZoom * (g.dist / gesture.dist)),
+            );
+            this.panX = ax - (ax - this.panX) * (nz / oldZoom);
+            this.panY = ay - (ay - this.panY) * (nz / oldZoom);
+            this.zoom = nz;
+            this.zoomLabel.textContent = Math.round(this.zoom * 100) + "%";
+          }
+          gesture = g;
+          this.scheduleRedraw();
         }
       },
       { passive: true },
     );
-    this.canvas.addEventListener(
-      "touchend",
-      () => {
-        if (lastTouches) {
-          lastTouches = null;
-          this.isPanning = false;
-        }
-      },
-      { passive: true },
-    );
+    const endGesture = (e) => {
+      if (gesture && (!e.touches || e.touches.length < 2)) {
+        gesture = null;
+        this.isPanning = false;
+        this._gesturing = false;
+      }
+    };
+    this.canvas.addEventListener("touchend", endGesture, { passive: true });
+    this.canvas.addEventListener("touchcancel", endGesture, { passive: true });
 
     // Close color panel when tapping the board
     this.canvas.addEventListener("pointerdown", () =>
@@ -736,6 +832,10 @@ class Talkoboard {
       if (e.key !== "Escape" || !this.isOpen) return;
       if (this.colorPanel.classList.contains("show")) {
         this.toggleColorPanel(false);
+        return;
+      }
+      if (this.chatOpen) {
+        this.closeChat();
         return;
       }
       this.close();
@@ -782,11 +882,49 @@ class Talkoboard {
     window.addEventListener("resize", this._resizeHandler);
   }
 
-  getTouchCenter(touches) {
+  // Midpoint and finger spread for a two-finger touch (pan + pinch zoom).
+  touchGesture(touches) {
+    const a = touches[0],
+      b = touches[1];
+    const dx = b.clientX - a.clientX,
+      dy = b.clientY - a.clientY;
     return {
-      x: (touches[0].clientX + touches[1].clientX) / 2,
-      y: (touches[0].clientY + touches[1].clientY) / 2,
+      cx: (a.clientX + b.clientX) / 2,
+      cy: (a.clientY + b.clientY) / 2,
+      dist: Math.hypot(dx, dy),
     };
+  }
+
+  // Coalesce pan/zoom redraws to one per animation frame. Calling redraw() on
+  // every pointer/touch move (they fire faster than the display refreshes)
+  // thrashes the canvas and is what made panning feel slow and jittery.
+  scheduleRedraw() {
+    if (this._redrawRaf != null) return;
+    this._redrawRaf = requestAnimationFrame(() => {
+      this._redrawRaf = null;
+      this.redraw();
+    });
+  }
+
+  // Drop the stroke in progress (e.g. a second finger landed to start a pan).
+  // The partial stroke was already broadcast, so tell everyone to end then
+  // remove it, and clear our own canvas so no stray mark is left behind.
+  _abortCurrentStroke() {
+    if (!this.drawing && !this.currentStroke) return;
+    const s = this.currentStroke;
+    this.drawing = false;
+    this.lastPoint = null;
+    this.currentStroke = null;
+    this.pointBuffer = [];
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (s) {
+      this.socket.emit("board stroke end");
+      this.socket.emit("board stroke remove", { id: s.id });
+    }
+    this.redraw();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1089,6 +1227,16 @@ class Talkoboard {
       this.flushTimer = null;
     }
 
+    if (this._cursorRaf != null) {
+      cancelAnimationFrame(this._cursorRaf);
+      this._cursorRaf = null;
+    }
+    if (this._redrawRaf != null) {
+      cancelAnimationFrame(this._redrawRaf);
+      this._redrawRaf = null;
+    }
+    this.closeChat();
+
     this.toggleColorPanel(false);
     this.deactivateEyedropper();
     this.modal.classList.remove("show");
@@ -1180,7 +1328,7 @@ class Talkoboard {
     }
 
     this.zoomLabel.textContent = Math.round(this.zoom * 100) + "%";
-    this.redraw();
+    this.scheduleRedraw();
   }
 
   resetView() {
@@ -1188,6 +1336,53 @@ class Talkoboard {
     this.panY = 0;
     this.zoom = 1;
     this.zoomLabel.textContent = "100%";
+    this.redraw();
+  }
+
+  // Fit every stroke into view with a margin. On an infinite canvas this is the
+  // quickest way back to the drawing after panning or zooming away from it.
+  fitToView() {
+    const all = [...this.strokes];
+    for (const [, s] of this.remoteActiveStrokes) all.push(s);
+    if (this.currentStroke) all.push(this.currentStroke);
+
+    let minX = Infinity,
+      minY = Infinity,
+      maxX = -Infinity,
+      maxY = -Infinity;
+    for (const s of all) {
+      if (!s.points) continue;
+      const r = (s.size || 1) / 2 + 2;
+      for (const p of s.points) {
+        if (p.x - r < minX) minX = p.x - r;
+        if (p.y - r < minY) minY = p.y - r;
+        if (p.x + r > maxX) maxX = p.x + r;
+        if (p.y + r > maxY) maxY = p.y + r;
+      }
+    }
+    if (!isFinite(minX)) {
+      this.showHint("Nothing to fit yet");
+      return;
+    }
+
+    const pad = 60;
+    const bw = Math.max(1, maxX - minX);
+    const bh = Math.max(1, maxY - minY);
+    const z = Math.min(
+      this.MAX_ZOOM,
+      Math.max(
+        this.MIN_ZOOM,
+        Math.min(
+          (this.displayWidth - pad * 2) / bw,
+          (this.displayHeight - pad * 2) / bh,
+        ),
+      ),
+    );
+    this.zoom = z;
+    // Center the bounding box in the viewport.
+    this.panX = this.displayWidth / 2 - ((minX + maxX) / 2) * z;
+    this.panY = this.displayHeight / 2 - ((minY + maxY) / 2) * z;
+    this.zoomLabel.textContent = Math.round(this.zoom * 100) + "%";
     this.redraw();
   }
 
@@ -1291,9 +1486,6 @@ class Talkoboard {
     ctx.translate(this.panX, this.panY);
     ctx.scale(this.zoom, this.zoom);
 
-    // Grid
-    this.drawGrid(ctx, w, h);
-
     // All completed strokes (bezier-smoothed)
     for (const stroke of this.strokes) {
       this.renderStrokeSmooth(ctx, stroke);
@@ -1312,23 +1504,6 @@ class Talkoboard {
     ctx.restore();
   }
 
-  drawGrid(ctx, screenW, screenH) {
-    const spacing = 40;
-    const tl = this.screenToWorld(0, 0);
-    const br = this.screenToWorld(screenW, screenH);
-
-    ctx.fillStyle = "#e3e3e3";
-    const startX = Math.floor(tl.x / spacing) * spacing;
-    const startY = Math.floor(tl.y / spacing) * spacing;
-
-    for (let x = startX; x < br.x; x += spacing) {
-      for (let y = startY; y < br.y; y += spacing) {
-        ctx.beginPath();
-        ctx.arc(x, y, 1, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STROKE RENDERING - BEZIER SMOOTH (used in full redraws)
@@ -1561,13 +1736,17 @@ class Talkoboard {
   }
 
   onPointerMove(e) {
+    // During a two-finger gesture the touch handlers own pan + pinch zoom; the
+    // per-finger pointer events would fight them, so ignore them here.
+    if (this._gesturing) return;
+
     // Send cursor position to others
     this.sendCursorPosition(e);
 
     if (this.isPanning && this.panStart) {
       this.panX = this.panStart.px + (e.clientX - this.panStart.x);
       this.panY = this.panStart.py + (e.clientY - this.panStart.y);
-      this.redraw();
+      this.scheduleRedraw();
       return;
     }
 
@@ -1790,6 +1969,12 @@ class Talkoboard {
   // LIVE CURSORS
   // ═══════════════════════════════════════════════════════════════════════════
 
+  _now() {
+    return window.performance && performance.now
+      ? performance.now()
+      : Date.now();
+  }
+
   updateRemoteCursor(data) {
     let cursor = this.remoteCursors.get(data.userId);
 
@@ -1802,39 +1987,109 @@ class Talkoboard {
 
       const label = document.createElement("span");
       label.className = "tb-cursor-label";
-      label.textContent = data.username;
+      label.textContent = data.username || "User";
 
       el.appendChild(dot);
       el.appendChild(label);
       this.cursorLayer.appendChild(el);
 
-      cursor = { el, x: 0, y: 0, username: data.username };
+      cursor = { el, dot, buf: [], lastSeen: 0, username: data.username };
       this.remoteCursors.set(data.userId, cursor);
     }
 
-    cursor.x = data.x;
-    cursor.y = data.y;
+    // Tint the dot with the drawer's live color once we know it (set on their
+    // first stroke); until then it keeps the default accent from the stylesheet.
+    const col = this.peerColors.get(data.userId);
+    if (col && cursor.dot) cursor.dot.style.background = col;
 
-    const screen = this.worldToScreen(data.x, data.y);
-    cursor.el.style.transform = `translate(${screen.x}px, ${screen.y}px)`;
+    // Buffer the snapshot (world coords, tagged with local arrival time) instead
+    // of jumping the cursor now; the rAF loop interpolates from it. This is what
+    // kills the snapping - we never jump straight to the latest packet.
+    const now = this._now();
+    cursor.buf.push({ t: now, x: data.x, y: data.y });
+    if (cursor.buf.length > 120) cursor.buf.splice(0, cursor.buf.length - 120);
+    cursor.lastSeen = now;
+    this._ensureCursorLoop();
+  }
 
-    const visible =
-      screen.x >= -50 &&
-      screen.x <= this.displayWidth + 50 &&
-      screen.y >= -50 &&
-      screen.y <= this.displayHeight + 50;
-    cursor.el.style.display = visible ? "block" : "none";
+  // One rAF loop drives every remote cursor at the display refresh rate, no
+  // matter how irregularly packets land. It runs only while a cursor is live and
+  // stops itself once they all go idle; the next packet restarts it.
+  _ensureCursorLoop() {
+    if (this._cursorRaf == null && this.isOpen) {
+      this._cursorRaf = requestAnimationFrame(() => this._cursorFrame());
+    }
+  }
 
-    if (cursor.timeout) clearTimeout(cursor.timeout);
-    cursor.timeout = setTimeout(() => {
-      cursor.el.style.display = "none";
-    }, 3000);
+  _cursorFrame() {
+    this._cursorRaf = null;
+    if (!this.isOpen) return;
+    const now = this._now();
+    const renderTime = now - this.CURSOR_RENDER_DELAY; // render slightly in the past
+    let live = false;
+    for (const [, c] of this.remoteCursors) {
+      if (now - c.lastSeen > this.CURSOR_TIMEOUT) {
+        if (c.el.style.display !== "none") c.el.style.display = "none";
+        continue;
+      }
+      live = true;
+      const pos = this._sampleCursor(c.buf, renderTime);
+      if (pos) {
+        // Buffered in WORLD coords; convert each frame so cursors stay glued to
+        // the board even while the local user pans or zooms.
+        const s = this.worldToScreen(pos.x, pos.y);
+        const visible =
+          s.x >= -60 && s.x <= this.displayWidth + 60 &&
+          s.y >= -60 && s.y <= this.displayHeight + 60;
+        if (visible) {
+          c.el.style.transform = `translate(${s.x}px, ${s.y}px)`;
+          if (c.el.style.display !== "block") c.el.style.display = "block";
+        } else if (c.el.style.display !== "none") {
+          c.el.style.display = "none";
+        }
+      }
+      this._pruneCursorBuf(c.buf, renderTime);
+    }
+    if (live) this._cursorRaf = requestAnimationFrame(() => this._cursorFrame());
+  }
+
+  // Find the two snapshots straddling renderTime and lerp between them. Before
+  // the buffer starts, hold the oldest; past the newest (a late packet or the
+  // sender paused) HOLD at the last point. We deliberately do NOT extrapolate -
+  // projecting past the final point then correcting is exactly what made the
+  // cursor snap back when someone stopped moving.
+  _sampleCursor(buf, renderTime) {
+    const n = buf.length;
+    if (n === 0) return null;
+    if (n === 1 || renderTime <= buf[0].t) return { x: buf[0].x, y: buf[0].y };
+    for (let i = n - 1; i > 0; i--) {
+      const a = buf[i - 1],
+        b = buf[i];
+      if (a.t <= renderTime && renderTime <= b.t) {
+        const span = b.t - a.t;
+        const f = span > 0 ? (renderTime - a.t) / span : 1;
+        return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
+      }
+    }
+    const b = buf[n - 1];
+    return { x: b.x, y: b.y };
+  }
+
+  // Keep the snapshot just before renderTime (and everything after) so there is
+  // always a segment to interpolate; never drop below two.
+  _pruneCursorBuf(buf, renderTime) {
+    let lo = 0;
+    for (let i = 0; i < buf.length; i++) {
+      if (buf[i].t <= renderTime) lo = i;
+      else break;
+    }
+    const drop = Math.min(lo, Math.max(0, buf.length - 2));
+    if (drop > 0) buf.splice(0, drop);
   }
 
   removeRemoteCursor(userId) {
     const cursor = this.remoteCursors.get(userId);
     if (cursor) {
-      if (cursor.timeout) clearTimeout(cursor.timeout);
       if (cursor.el.parentNode) cursor.el.parentNode.removeChild(cursor.el);
       this.remoteCursors.delete(userId);
     }
@@ -1857,13 +2112,13 @@ class Talkoboard {
     let h = 0;
     const s = String(userId || "x");
     for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) & 0xffff;
-    return `hsl(${h % 360}, 70%, 72%)`;
+    return `hsl(${h % 360}, 65%, 38%)`;
   }
 
-  // The chat panel is dark and the avatar's initial is dark, so a dark drawing
-  // color (black, navy, dark red) would be invisible as a name and as an avatar.
-  // Lift only very dark colors to a readable lightness while keeping their hue;
-  // the color panel swatches still use the true color, so this is chat-only.
+  // The chat floats over the white board, so a pale drawing color (yellow, white,
+  // light blue) would be invisible as a name. Darken only very light colors to a
+  // readable lightness while keeping their hue; mid/dark colors pass through. The
+  // color panel swatches still use the true color, so this is chat-only.
   readableColor(color) {
     const hex = this.normalizeHex(color);
     const n = parseInt(hex.slice(1), 16);
@@ -1871,7 +2126,7 @@ class Talkoboard {
       g = (n >> 8) & 255,
       b = n & 255;
     const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-    if (lum >= 0.5) return color; // already legible on the dark chat
+    if (lum <= 0.5) return color; // already legible on the white board
     const rn = r / 255,
       gn = g / 255,
       bn = b / 255;
@@ -1888,62 +2143,57 @@ class Talkoboard {
       else h = (rn - gn) / d + 4;
       h *= 60;
     }
-    const nl = Math.max(l, 0.62); // lightness floor so it reads on #202020
+    const nl = Math.min(l, 0.4); // lightness ceiling so it reads on white
     return `hsl(${Math.round(h)}, ${Math.round(sat * 100)}%, ${Math.round(nl * 100)}%)`;
   }
 
-  addChatMessage(data) {
-    this.chatMessages.push(data);
-    if (this.chatMessages.length > this.MAX_CHAT_MESSAGES) {
-      this.chatMessages.shift();
-      if (this.chatLog.firstChild)
-        this.chatLog.removeChild(this.chatLog.firstChild);
+  // Append a chat node and trim history. Only autoscroll if already near the
+  // bottom, so reading or selecting older messages is not yanked away when a new
+  // one arrives.
+  _appendChat(node) {
+    const log = this.chatLog;
+    const nearBottom =
+      log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+    this.chatNodes.push(node);
+    log.appendChild(node);
+    while (this.chatNodes.length > this.MAX_CHAT_MESSAGES) {
+      const old = this.chatNodes.shift();
+      if (old && old.parentNode) old.parentNode.removeChild(old);
     }
+    if (nearBottom) log.scrollTop = log.scrollHeight;
+  }
 
+  addChatMessage(data) {
+    if (!data || typeof data.text !== "string") return;
     if (data.userId && data.username)
       this.notePeerName(data.userId, data.username);
 
     const isSelf = data.userId === this.userId;
-    const col = isSelf ? "#ff9800" : this.nameColor(data.userId);
+    // Self uses a deep, readable orange on the white board; everyone else uses
+    // their drawing color, darkened by nameColor so pale colors stay legible.
+    const col = isSelf ? "#c25e00" : this.nameColor(data.userId);
 
     const msg = document.createElement("div");
-    msg.className = "tb-chat-msg";
-    if (isSelf) msg.classList.add("tb-chat-self");
-
-    // A small colored avatar with the sender's initial gives each person a
-    // consistent identity in the log.
-    const avatar = document.createElement("span");
-    avatar.className = "tb-chat-avatar";
-    avatar.style.background = col;
-    avatar.textContent =
-      (data.username || "?").trim().charAt(0).toUpperCase() || "?";
-
-    const body = document.createElement("div");
-    body.className = "tb-chat-body";
+    msg.className = "tb-chat-msg" + (isSelf ? " tb-chat-self" : "");
 
     const name = document.createElement("span");
     name.className = "tb-chat-name";
-    name.textContent = data.username;
+    name.textContent = data.username || "User";
     name.style.color = col;
 
     const text = document.createElement("span");
     text.className = "tb-chat-text";
-    text.textContent = data.text;
+    text.textContent = " " + data.text;
 
-    body.appendChild(name);
-    body.appendChild(text);
-    msg.appendChild(avatar);
-    msg.appendChild(body);
-    this.chatLog.appendChild(msg);
-    this.chatLog.scrollTop = this.chatLog.scrollHeight;
+    msg.appendChild(name);
+    msg.appendChild(text);
+    this._appendChat(msg);
 
-    // Nudge the user if a message arrives while chat is collapsed
-    if (this.chatCollapsed && data.userId !== this.userId) {
-      this.chatToggle.classList.add("tb-chat-unread");
-      setTimeout(
-        () => this.chatToggle.classList.remove("tb-chat-unread"),
-        2500,
-      );
+    // Badge the closed bubble so new messages are noticed without the panel
+    // covering the board.
+    if (!this.chatOpen && data.userId !== this.userId) {
+      this.chatUnread++;
+      this.updateChatBadge();
     }
   }
 
@@ -2021,14 +2271,19 @@ class Talkoboard {
   destroy() {
     if (this.isOpen) this.close();
     if (this.flushTimer) clearInterval(this.flushTimer);
+    if (this._cursorRaf != null) {
+      cancelAnimationFrame(this._cursorRaf);
+      this._cursorRaf = null;
+    }
+    if (this._redrawRaf != null) {
+      cancelAnimationFrame(this._redrawRaf);
+      this._redrawRaf = null;
+    }
     document.removeEventListener("keydown", this._escHandler);
     document.removeEventListener("keydown", this._undoKeyHandler);
     document.removeEventListener("keydown", this._spaceHandler);
     document.removeEventListener("keyup", this._spaceHandler);
     window.removeEventListener("resize", this._resizeHandler);
-    for (const [, cursor] of this.remoteCursors) {
-      if (cursor.timeout) clearTimeout(cursor.timeout);
-    }
     if (this.modal && this.modal.parentNode) {
       this.modal.parentNode.removeChild(this.modal);
     }

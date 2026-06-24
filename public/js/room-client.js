@@ -14,9 +14,10 @@ const socket = io({
       undefined,
   },
 });
-// Restart countdown + reconnect overlay so a server restart sends users to the
-// lobby instead of freezing them on a dead socket.
-if (window.TalkomaticConnection) window.TalkomaticConnection.attach(socket);
+// On a server restart, show an "updating" notice and reconnect in place (the
+// reconnect handler below rejoins the room) instead of bouncing to the lobby.
+if (window.TalkomaticConnection)
+  window.TalkomaticConnection.attach(socket, { rejoinInPlace: true });
 
 let currentUsername = "";
 let currentLocation = "";
@@ -31,6 +32,13 @@ let userLayoutPreference = null;
 let currentRoomName = "";
 let lastSentMessage = "";
 let chatInput = null;
+// Socket protocol this client speaks. Must match CONFIG.VERSIONS.PROTOCOL on
+// the server; on a mismatch after a deploy the client reloads once to pick up
+// new code. Bump both together only when a message shape changes.
+const CLIENT_PROTOCOL = 1;
+// Text the user had typed when the socket dropped, captured at reconnect time
+// so a server restart (which forgets live buffers) can re-push it on rejoin.
+let pendingRestoreText = null;
 let talkoboardInstance = null;
 let pianoInstance = null;
 
@@ -2383,6 +2391,20 @@ socket.on("room full", () => {
 });
 
 socket.on("room joined", (data) => {
+  // Protocol gate: if the server speaks a different message version than the JS
+  // we are running, a breaking deploy happened under us. Reload once (guarded
+  // so a stale cache can't loop) to pick up the matching client. A matching
+  // protocol means the restart is invisible and we just rejoin below.
+  if (data.protocol != null && data.protocol !== CLIENT_PROTOCOL) {
+    if (!sessionStorage.getItem("tkProtoReload")) {
+      sessionStorage.setItem("tkProtoReload", "1");
+      window.location.reload();
+      return;
+    }
+  } else {
+    sessionStorage.removeItem("tkProtoReload");
+  }
+
   currentUserId = data.userId;
   currentRoomId = data.roomId;
   currentUsername = data.username;
@@ -2419,6 +2441,22 @@ socket.on("room joined", (data) => {
   applyRoomFlags(data);
 
   renderDevContext();
+
+  // After a server restart we rejoin a room the server rehydrated from disk,
+  // but our typed text only lived in memory and is gone server-side (and
+  // updateCurrentMessages just blanked our row). Re-render it locally and push
+  // it back so the whole room sees it again. pendingRestoreText was captured at
+  // reconnect time, before this handler ran.
+  if (pendingRestoreText) {
+    const restore = pendingRestoreText;
+    pendingRestoreText = null;
+    if (restore && currentUserId) {
+      updateCurrentMessages({ [currentUserId]: restore });
+      socket.emit("chat update", {
+        diff: { type: "full-replace", text: restore },
+      });
+    }
+  }
 
   setTimeout(() => {
     if (chatInput) {
@@ -2609,17 +2647,54 @@ function joinRoom(roomId, accessCode = null) {
   socket.emit("join room", { roomId, accessCode });
 }
 
-// On reconnect (e.g. an idle or backgrounded tab dropped its socket and came
-// back), re-join the room. The server already dropped our old socket and
-// removed us from the room, so without this we become a ghost: still in the
-// room on our own screen, but gone for everyone else, and our typing reaches
-// no one. Staff notice this most because they are never AFK-redirected out of
-// a room. Spectators re-spectate. Semi-private access stays valid via the
-// session, so no code is needed here.
+// On reconnect (an idle/backgrounded tab that dropped, or a server restart)
+// get the user back into their room with no manual step. Without this we become
+// a ghost: still in the room on our own screen, but gone for everyone else, and
+// our typing reaches no one. Staff notice this most because they are never
+// AFK-redirected out of a room. Spectators re-spectate.
+//
+// A plain network blip keeps the server's session, so a bare rejoin works and
+// semi-private access stays valid via the session. A server restart wipes the
+// in-memory session, so the rejoin would otherwise land as "Anonymous": we
+// first re-announce identity through the normal sign-in ("join lobby", which
+// re-validates the name and the reserved-name/key rule), then rejoin once it is
+// set. Doing this on every reconnect is harmless and keeps the path simple.
 socket.io.on("reconnect", () => {
   if (tabSuperseded || !currentRoomId) return;
-  if (isSpectating) socket.emit("staff spectate", { roomId: currentRoomId });
-  else socket.emit("join room", { roomId: currentRoomId });
+  if (isSpectating) {
+    socket.emit("staff spectate", { roomId: currentRoomId });
+    return;
+  }
+
+  // Capture typed text now, before "room joined" / updateCurrentMessages can
+  // blank our row, so it can be re-pushed after a restart forgot our buffer.
+  pendingRestoreText =
+    (typeof selfRawText === "string" && selfRawText) || lastSentMessage || null;
+
+  const uname = currentUsername || localStorage.getItem("talkomaticUsername");
+  const uloc =
+    currentLocation ||
+    localStorage.getItem("talkomaticLocation") ||
+    "On The Web";
+
+  if (!uname) {
+    // No identity to restore (shouldn't happen on an established room page);
+    // fall back to the bare rejoin.
+    socket.emit("join room", { roomId: currentRoomId });
+    return;
+  }
+
+  // Rejoin once the sign-in is acknowledged. The timeout is a fallback so a
+  // missed ack never strands the reconnect on the "updating" overlay.
+  let rejoined = false;
+  const doJoin = () => {
+    if (rejoined) return;
+    rejoined = true;
+    socket.emit("join room", { roomId: currentRoomId });
+  };
+  socket.once("signin status", doJoin);
+  setTimeout(doJoin, 1500);
+  socket.emit("join lobby", { username: uname, location: uloc });
 });
 
 // Reads roomId from the URL and scrubs any legacy ?accessCode= parameter

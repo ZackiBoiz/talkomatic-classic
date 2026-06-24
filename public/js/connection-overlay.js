@@ -7,6 +7,11 @@
   "use strict";
   var restarting = false;
   var reconnectTimer = null;
+  // When true (the room page), a restart does NOT redirect to the lobby - it
+  // shows an "updating" notice and lets Socket.IO reconnect, so the client can
+  // rejoin the same room in place. The lobby leaves this false and keeps the
+  // old countdown+redirect (for the lobby that is just a harmless refresh).
+  var rejoinInPlace = false;
 
   function styles() {
     if (document.getElementById("tkConnStyles")) return;
@@ -84,6 +89,34 @@
     o.style.display = "flex";
   }
 
+  // Room page: a restart shows this notice and we wait for Socket.IO to
+  // reconnect (the room client then rejoins in place). No countdown, no
+  // redirect - the connect handler hides it once we are back.
+  function showUpdating() {
+    restarting = true;
+    styles();
+    var o = overlay();
+    o.innerHTML =
+      '<div class="tk-conn-box"><div class="tk-conn-spinner"></div>' +
+      '<div class="tk-conn-title">Talkomatic is updating</div>' +
+      '<div class="tk-conn-msg">Reconnecting you to your room. Hold tight, ' +
+      "this only takes a moment.</div></div>";
+    // Surface an escape hatch only if the reconnect is taking too long, so a
+    // failed deploy never strands anyone in the spinner.
+    var btn = document.createElement("button");
+    btn.textContent = "Return to lobby";
+    btn.style.display = "none";
+    btn.addEventListener("click", function () {
+      window.location.href = "/";
+    });
+    o.querySelector(".tk-conn-box").appendChild(btn);
+    o.style.display = "flex";
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(function () {
+      btn.style.display = "";
+    }, 8000);
+  }
+
   function hide() {
     if (restarting) return;
     var o = document.getElementById("tkConnOverlay");
@@ -91,10 +124,12 @@
   }
 
   window.TalkomaticConnection = {
-    attach: function (socket) {
+    attach: function (socket, opts) {
       if (!socket) return;
+      rejoinInPlace = !!(opts && opts.rejoinInPlace);
       socket.on("server restarting", function (d) {
-        showRestart((d && d.seconds) || 5);
+        if (rejoinInPlace) showUpdating();
+        else showRestart((d && d.seconds) || 5);
       });
       socket.on("disconnect", function (reason) {
         // Ignore intentional disconnects (tab handoff, navigation).
@@ -103,7 +138,10 @@
         reconnectTimer = setTimeout(showReconnecting, 1200); // grace for blips
       });
       socket.on("connect", function () {
+        // A successful (re)connect ends any restart/reconnect notice. Clearing
+        // the restarting flag lets hide() actually close the overlay.
         clearTimeout(reconnectTimer);
+        restarting = false;
         hide();
       });
     },

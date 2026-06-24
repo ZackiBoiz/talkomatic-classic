@@ -88,8 +88,14 @@ function beginShutdown(signal) {
     if (state.io) state.io.emit("server restarting", { seconds: 5 });
   } catch (e) {}
   // Let the notice flush before we drop sockets, persist, and exit. Stays under
-  // pm2's kill_timeout (default 1600ms).
-  setTimeout(() => {
+  // pm2's kill_timeout (default 1600ms). Rooms are force-saved (past the save
+  // throttle) so returning clients rejoin the rooms they were in.
+  setTimeout(async () => {
+    try {
+      await rooms.saveRooms(true);
+    } catch (e) {
+      console.error("Shutdown room save failed:", e);
+    }
     gracefulFlush();
     process.exit(0);
   }, 800);
@@ -754,19 +760,8 @@ app.get(`${API}/wc/games`, async (req, res) => {
   }
 });
 
-// Graceful shutdown: save rooms before exit
-async function shutdown(signal) {
-  if (shuttingDown) return; // the signal handler above already runs the shutdown
-  console.log(`${signal} received. Saving rooms and shutting down...`);
-  try {
-    await rooms.saveRooms();
-  } catch (e) {
-    console.error("Shutdown save failed:", e);
-  }
-  process.exit(0);
-}
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+// Shutdown is handled by beginShutdown() above (SIGINT/SIGTERM), which notifies
+// clients, force-saves rooms, flushes the other stores, then exits.
 
 start().catch((err) => {
   console.error("Startup failed:", err);

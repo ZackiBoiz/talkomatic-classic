@@ -1148,9 +1148,11 @@ function sendDevLobbyContext() {
 
 // ── Room Save / Load ────────────────────────────────────────────────────────
 
-async function saveRooms() {
+async function saveRooms(force = false) {
   const now = Date.now();
-  if (now - state.lastSaveTimestamp < state.SAVE_INTERVAL_MIN) return;
+  // The throttle keeps routine saves cheap; a forced save (clean shutdown)
+  // bypasses it so the very latest room state survives the restart.
+  if (!force && now - state.lastSaveTimestamp < state.SAVE_INTERVAL_MIN) return;
   try {
     const data = Array.from(state.rooms.entries()).map(([id, room]) => {
       return [
@@ -1713,6 +1715,7 @@ function emitJoinSuccess(socket, room, userId, username, location) {
 
   // The joining user always sees themselves in full
   socket.emit("room joined", {
+    protocol: CONFIG.VERSIONS.PROTOCOL,
     roomId: room.id,
     userId,
     username,
@@ -4605,6 +4608,12 @@ function registerSocketHandlers() {
             ),
           );
         socket._lastReport = now;
+        // Snapshot what the reported user has typed right now, so staff see the
+        // offending text in the report even after it is edited, cleared, or the
+        // user leaves. Sanitized like any chat text; capped for the feed.
+        const targetText = sanitizeMessage(
+          state.userMessageBuffers.get(targetUserId) || "",
+        ).slice(0, 300);
         const reporter = socket.handshake.session?.username || "A user";
         const catLabel = REPORT_CATEGORIES[category];
         const targetRole = targetSocket?.isDev
@@ -4624,12 +4633,14 @@ function registerSocketHandlers() {
           targetIp: targetSocket?.clientIp || null,
           targetDeviceId: targetSocket?.deviceId || null,
           targetRole,
+          targetText,
         });
         const targetIsStaff = !!targetRole;
         const text =
           `${reporter} reported ${targetName}${targetIsStaff ? " (staff)" : ""} for ${catLabel}` +
           (reason ? `: ${reason}` : "") +
-          `. ${tally.distinct} ${tally.distinct === 1 ? "person has" : "people have"} reported ${targetName} recently.`;
+          `. ${tally.distinct} ${tally.distinct === 1 ? "person has" : "people have"} reported ${targetName} recently.` +
+          (targetText ? ` Their chat box read: "${targetText}"` : "");
         audit.recordNotification({
           kind: "report",
           text,
@@ -5507,27 +5518,57 @@ function startCleanupIntervals() {
 // ── Ghost Purge (Startup) ───────────────────────────────────────────────────
 
 function purgeAllGhostUsers() {
+  // A "ghost" is a room user with no live socket: a leftover from a room loaded
+  // from disk, or a crash. Only those get purged. We must NOT blindly wipe room
+  // users, because by the time this runs (a couple of seconds after boot)
+  // clients have already reconnected and rejoined - wiping would kick the very
+  // users we just let back in. Mirrors the 60s ghost cleanup in
+  // startCleanupIntervals().
+  const activeIds = new Set();
+  for (const [, s] of io().sockets.sockets) {
+    const uid = s.handshake?.session?.userId;
+    if (uid) activeIds.add(uid);
+  }
   let total = 0;
+  const affected = [];
   for (const [roomId, room] of state.rooms) {
-    if (room.users && room.users.length > 0) {
-      console.log(
-        `Startup purge: ${room.users.length} ghost(s) from "${room.name}"`,
-      );
-      total += room.users.length;
-      room.users.forEach((u) => {
-        state.userMessageBuffers.delete(u.id);
-        clearAFKTimers(u.id);
-        state.devUsers.delete(u.id);
-      });
-      room.users = [];
-      room.votes = {};
-      room.lastActiveTime = Date.now();
-      cleanupBoardState(roomId);
-      startRoomDeletionTimer(roomId);
+    if (!room.users || room.users.length === 0) continue;
+    const before = room.users.length;
+    room.users = room.users.filter((u) => {
+      if (activeIds.has(u.id)) return true; // live socket -> a real user, keep
+      state.userMessageBuffers.delete(u.id);
+      clearAFKTimers(u.id);
+      state.devUsers.delete(u.id);
+      if (room.votes) {
+        delete room.votes[u.id];
+        for (const vid in room.votes)
+          if (room.votes[vid] === u.id) delete room.votes[vid];
+      }
+      console.log(`Startup purge: ghost "${u.username}" from "${room.name}"`);
+      return false;
+    });
+    const removed = before - room.users.length;
+    if (removed > 0) {
+      total += removed;
+      affected.push(roomId);
+    }
+  }
+  for (const id of affected) {
+    const r = state.rooms.get(id);
+    if (!r) continue;
+    r.lastActiveTime = Date.now();
+    updateRoom(id);
+    updateRoomSoloTracking(id);
+    // Only tear down board state / arm the delete timer if the room is now
+    // truly empty; a room with surviving live users keeps its board.
+    if (r.users.length === 0) {
+      cleanupBoardState(id);
+      startRoomDeletionTimer(id);
     }
   }
   if (total > 0) {
     console.log(`Startup purge: removed ${total} ghost(s)`);
+    updateLobby();
     debouncedSaveRooms().catch(() => { });
   } else console.log("Startup purge: no ghosts found");
 }

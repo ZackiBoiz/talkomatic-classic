@@ -21,7 +21,7 @@ const WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // keep a target's reports for 7 days
 const MAX_TARGETS = 5000;
 const MAX_PER_TARGET = 100;
 
-let byTarget = new Map(); // targetKey -> [{ byDeviceId, byName, category, reason, at, targetIp, targetDeviceId, targetRole }]
+let byTarget = new Map(); // targetKey -> [{ byDeviceId, byName, category, reason, at, targetIp, targetDeviceId, targetRole, targetText }]
 let saveTimer = null;
 let dirty = false;
 
@@ -104,6 +104,7 @@ function add({
   targetIp,
   targetDeviceId,
   targetRole,
+  targetText,
 }) {
   if (!targetKey) return { total: 0, distinct: 0 };
   const now = Date.now();
@@ -122,6 +123,9 @@ function add({
     targetIp: targetIp || null,
     targetDeviceId: targetDeviceId || null,
     targetRole: targetRole || null,
+    // What the reported user had typed in their chat box at report time, so
+    // staff can see the offending text even after it is cleared or they leave.
+    targetText: targetText || null,
   });
   if (arr.length > MAX_PER_TARGET) arr.splice(0, arr.length - MAX_PER_TARGET);
   prune(now);

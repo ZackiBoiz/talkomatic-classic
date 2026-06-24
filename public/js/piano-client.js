@@ -1772,6 +1772,18 @@ class Piano {
     this.socket.on("piano participants", (d) => this.handleParticipants(d));
     this.socket.on("piano user status", (d) => this.handleUserStatus(d));
     this.socket.on("user left", (uid) => this.onUserLeft(uid));
+
+    // A dropped socket (e.g. a server restart) leaves remote notes hanging.
+    // Clear all sounding voices and lit keys so nothing looks frozen while we
+    // reconnect; physically-held keys are released normally on keyup/pointerup,
+    // and remote players re-announce themselves after reconnecting.
+    this.socket.on("disconnect", () => this.panic());
+    // After reconnecting, re-announce that the piano is open for us: server
+    // piano state is per-process and was wiped by the restart, so the rejoined
+    // room needs to learn we are here again.
+    this.socket.on("connect", () => {
+      if (this.isOpen && this.mode === "room") this.socket.emit("piano open");
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════

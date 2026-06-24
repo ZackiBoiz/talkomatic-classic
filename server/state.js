@@ -61,7 +61,11 @@ const CONFIG = {
   },
   FEATURES: {
     ENABLE_WORD_FILTER: true,
-    LOAD_ROOMS_ON_STARTUP: false,
+    // Rehydrate rooms from rooms.json on boot so a restart/redeploy keeps rooms
+    // alive. loadRooms() clears their member lists and starts the empty-room
+    // deletion timers, so returning users repopulate them and rooms nobody
+    // comes back to self-delete. Set false to start every boot with no rooms.
+    LOAD_ROOMS_ON_STARTUP: true,
     ENABLE_BOT_PROTECTION: true,
     ENABLE_DYNAMIC_SCALING: true,
     ENABLE_STRICT_ANTIBOT: true,
@@ -91,6 +95,11 @@ const CONFIG = {
   VERSIONS: {
     API: "v1",
     SERVER: "2.3.0",
+    // Socket message-shape version. Restarts are invisible while this matches
+    // the client's baked-in copy; bump it ONLY when a client<->server payload
+    // shape changes, which makes still-open clients reload once to pick up the
+    // new code instead of silently rejoining with a stale protocol.
+    PROTOCOL: 1,
   },
 
   // Dev mode: SHA-256 hash of the secret dev key, set in .env as DEV_KEY_HASH.
