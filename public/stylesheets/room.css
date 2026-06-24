@@ -2210,8 +2210,12 @@ html {
   overflow-y: auto;
   overflow-x: hidden;
   padding-bottom: 6px;
-  /* scrollable + selectable; sits below the keys so it never blocks playing */
-  pointer-events: auto;
+  /* Idle: faded, click-through (keys play through it), and NOT scrollable.
+     It becomes fully visible + scrollable only while the chat input is focused
+     (.mpp-chat.active below). Click the input to read/scroll; click away to play. */
+  pointer-events: none;
+  opacity: 0.4;
+  transition: opacity 0.45s ease;
   user-select: text;
   -webkit-user-select: text;
   -webkit-mask-image: linear-gradient(
@@ -2221,6 +2225,13 @@ html {
     transparent 100%
   );
   mask-image: linear-gradient(to top, #000 0%, #000 72%, transparent 100%);
+}
+/* Focused: full opacity, fully readable (no fade), scrollable + selectable. */
+.mpp-chat.active .mpp-chat-log {
+  pointer-events: auto;
+  opacity: 1;
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 /* Pins messages to the bottom when there are only a few, without breaking
    scroll-up to read history once they overflow. */

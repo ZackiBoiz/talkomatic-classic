@@ -864,6 +864,10 @@ class Piano {
       }
       e.stopPropagation();
     });
+    // Focusing the input "wakes" the chat: full opacity + scrollable. Blurring
+    // lets it fade back and become click-through so the keys play again.
+    this.chatInput.addEventListener("focus", () => chat.classList.add("active"));
+    this.chatInput.addEventListener("blur", () => chat.classList.remove("active"));
     inputWrap.appendChild(this.chatInput);
     chat.appendChild(this.chatLog);
     chat.appendChild(inputWrap);
@@ -1425,6 +1429,8 @@ class Piano {
     this._onWheel = (e) => {
       if (!this.isOpen || this.mode === "solo" || !this.chatEl || !this.chatLog)
         return;
+      // Only scroll when the chat is "awake" (input focused).
+      if (!this.chatEl.classList.contains("active")) return;
       const cr = this.chatEl.getBoundingClientRect();
       if (
         e.clientX < cr.left || e.clientX > cr.right ||
