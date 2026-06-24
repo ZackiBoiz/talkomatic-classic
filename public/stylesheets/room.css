@@ -1835,6 +1835,9 @@ html {
 .mpp-stage {
   flex: 1;
   position: relative;
+  /* Own stacking context: keeps the keyboard's z-index from ever climbing over
+     the header or the Sound/Help/People panels. */
+  z-index: 0;
   overflow: hidden;
   background: radial-gradient(
     130% 80% at 50% -10%,
@@ -1851,8 +1854,8 @@ html {
   align-items: center;
   justify-content: center;
   gap: 16px;
-  /* Bottom space reserved for the chat so the keyboard never sits under it. */
-  padding: 20px 20px 210px;
+  /* Small bottom reserve so the chat input row stays clear of the keys. */
+  padding: 20px 20px 70px;
   pointer-events: none;
 }
 .mpp-center > * {
@@ -1867,6 +1870,8 @@ html {
   justify-content: center;
   gap: 10px;
   flex-wrap: wrap;
+  position: relative;
+  z-index: 5; /* above the chat so its buttons are always clickable */
 }
 .mpp-tgroup {
   display: inline-flex;
@@ -1944,7 +1949,9 @@ html {
   display: flex;
   flex-direction: column;
   gap: var(--mpp-row-gap);
-  z-index: 999999;
+  /* Above the chat (so keys sit over the chat text) but below the toolbar and
+     the header/panels. The chat is click-through, so this never blocks scroll. */
+  z-index: 3;
 }
 .mpp-row {
   position: relative;
@@ -2178,22 +2185,27 @@ html {
 .mpp-chat {
   position: absolute;
   left: 0;
+  top: 8px;
   bottom: 0;
   width: min(42%, 600px);
-  height: 800px; /* a bottom-left band; the keyboard is kept above it */
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
   padding: 0 0 14px 16px;
-  z-index: 4;
-  pointer-events: none; /* empty area passes clicks through to nothing behind */
+  z-index: 2; /* under the keyboard - text flows beneath the keys */
+  /* Click-through so the keys underneath always play. The log is scrolled with
+     the mouse wheel (handled in piano-client.js) and directly where it is not
+     covered by the keyboard. */
+  pointer-events: none;
 }
 .mpp-chat-log {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
+  /* NOTE: do not use justify-content:flex-end here. Combined with overflow it
+     makes the top messages unreachable by scrolling. The first child's
+     margin-top:auto pins messages to the bottom while keeping full scrollback. */
   gap: 6px;
   overflow-y: auto;
   overflow-x: hidden;
@@ -2209,6 +2221,11 @@ html {
     transparent 100%
   );
   mask-image: linear-gradient(to top, #000 0%, #000 72%, transparent 100%);
+}
+/* Pins messages to the bottom when there are only a few, without breaking
+   scroll-up to read history once they overflow. */
+.mpp-chat-log > :first-child {
+  margin-top: auto;
 }
 .mpp-chat-log::-webkit-scrollbar {
   width: 6px;

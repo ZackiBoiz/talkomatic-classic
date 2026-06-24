@@ -1420,12 +1420,30 @@ class Piano {
       });
     };
 
+    // The chat is click-through (so keys always play), so it can't catch the
+    // wheel where the keyboard covers it. Route wheel-over-chat to the log here.
+    this._onWheel = (e) => {
+      if (!this.isOpen || this.mode === "solo" || !this.chatEl || !this.chatLog)
+        return;
+      const cr = this.chatEl.getBoundingClientRect();
+      if (
+        e.clientX < cr.left || e.clientX > cr.right ||
+        e.clientY < cr.top || e.clientY > cr.bottom
+      )
+        return;
+      const log = this.chatLog;
+      if (log.scrollHeight <= log.clientHeight) return; // nothing to scroll
+      log.scrollTop += e.deltaY;
+      e.preventDefault();
+    };
+
     document.addEventListener("keydown", this._onKeyDown);
     document.addEventListener("keyup", this._onKeyUp);
     document.addEventListener("pointerup", this._onPointerUp);
     document.addEventListener("pointercancel", this._onPointerCancel);
     document.addEventListener("click", this._onDocClick);
     window.addEventListener("resize", this._onResize);
+    document.addEventListener("wheel", this._onWheel, { passive: false });
 
     if (this.keyboardWrap)
       this.keyboardWrap.addEventListener("pointermove", (e) => this.onStagePointerMove(e));
@@ -1578,6 +1596,7 @@ class Piano {
     document.removeEventListener("pointercancel", this._onPointerCancel);
     document.removeEventListener("click", this._onDocClick);
     window.removeEventListener("resize", this._onResize);
+    document.removeEventListener("wheel", this._onWheel);
     for (const [, c] of this.cursors) if (c.timeout) clearTimeout(c.timeout);
     if (this.modal && this.modal.parentNode) this.modal.parentNode.removeChild(this.modal);
   }
