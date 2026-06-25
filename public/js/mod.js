@@ -41,6 +41,10 @@
   let focusUid = null;
   let unreadNotifs = 0;
   let applicationsList = [];
+  let appsPage = 0;
+  let appsFilter = "pending"; // pending | approved | rejected | all
+  let appsQuery = "";
+  const APPS_PAGE = 8;
   let reportsList = [];
   let invitesList = []; // flagged inviters (Invites tab)
   let invitesPage = 0;
@@ -139,6 +143,18 @@
     const i = document.createElement("i");
     i.className = "fas " + faClass + (cls ? " " + cls : "");
     return i;
+  }
+  function divc(cls) {
+    const d = document.createElement("div");
+    if (cls) d.className = cls;
+    return d;
+  }
+  // A centered empty-state block (returns the node; callers append it).
+  function emptyBox(faClass, text) {
+    const e = divc("empty");
+    e.appendChild(icon(faClass));
+    e.appendChild(document.createTextNode(text));
+    return e;
   }
   function initialOf(name) {
     return (
@@ -548,6 +564,177 @@
     if (d > 0) return d + "d " + pad(h) + ":" + pad(m) + ":" + pad(s) + " left";
     return pad(h) + ":" + pad(m) + ":" + pad(s) + " left";
   }
+  // Duration picker to re-time a live block from now (dev). Shortening reduces
+  // an over-long ban without lifting it first.
+  function openBanDurationMenu(b) {
+    if (!window.StaffUI) return;
+    const durs = [
+      {
+        label: "1 hour",
+        value: "1h",
+        icon: '<i class="fas fa-clock"></i>',
+        desc: "Ends 1 hour from now",
+      },
+      {
+        label: "24 hours",
+        value: "24h",
+        icon: '<i class="fas fa-clock"></i>',
+        desc: "Ends 24 hours from now",
+      },
+      {
+        label: "7 days",
+        value: "7d",
+        icon: '<i class="fas fa-calendar-week"></i>',
+        desc: "Ends 7 days from now",
+      },
+      {
+        label: "Permanent",
+        value: "permanent",
+        icon: '<i class="fas fa-ban"></i>',
+        desc: "Never expires",
+      },
+    ];
+    StaffUI.menu({
+      title: "Change ban duration",
+      icon: '<i class="fas fa-hourglass-half"></i>',
+      subtitle: (b.label || b.ip) + " · re-timed from now",
+      groups: [
+        {
+          items: durs.map((d) => ({
+            icon: d.icon,
+            label: d.label,
+            desc: d.desc,
+            danger: d.value === "permanent",
+            onClick: () =>
+              socket.emit("dev set block duration", {
+                ip: b.ip,
+                duration: d.value,
+              }),
+          })),
+        },
+      ],
+    });
+  }
+
+  // Edit the message a blocked user sees on the ban screen (dev).
+  async function editBanMessage(b) {
+    if (!window.StaffUI) return;
+    const reason = await StaffUI.prompt({
+      title: "Ban message",
+      icon: '<i class="fas fa-comment"></i>',
+      subtitle: "Shown to them on the ban screen when they try to connect",
+      fields: [
+        {
+          name: "value",
+          label: "Message (optional)",
+          type: "textarea",
+          value: b.reason || "",
+          placeholder:
+            "e.g. Banned for repeated harassment. Contact staff to appeal.",
+          maxLength: 500,
+        },
+      ],
+      confirmText: "Save message",
+    });
+    if (reason == null) return;
+    socket.emit("dev set block message", {
+      ip: b.ip,
+      reason: String(reason).trim(),
+    });
+  }
+
+  function buildBanCard(b, isDev) {
+    const card = divc("bancard" + (b.permanent ? " perm" : ""));
+    card.dataset.ip = b.ip;
+
+    // Header: avatar, name, who/when/where meta, live countdown pill
+    const head = divc("bc-head");
+    const av = divc("avatar");
+    av.style.background = b.permanent ? "var(--red)" : "var(--amber)";
+    av.textContent = initialOf(b.label || b.ip);
+    head.appendChild(av);
+
+    const idc = divc("bc-id");
+    idc.appendChild(span("bc-name", b.label || "Unknown user"));
+    const meta = divc("bc-meta");
+    if (isDev) meta.appendChild(span("ip", b.ip));
+    if (b.by) {
+      const by = span(null, "");
+      by.appendChild(document.createTextNode("by "));
+      const bb = document.createElement("b");
+      bb.textContent = b.by;
+      by.appendChild(bb);
+      meta.appendChild(by);
+    }
+    if (b.ts) {
+      const placed = span(null, "placed " + relTime(b.ts));
+      placed.title = fmtTime(b.ts);
+      meta.appendChild(placed);
+    }
+    idc.appendChild(meta);
+    head.appendChild(idc);
+
+    const pill = document.createElement("span");
+    pill.className = "pill " + (b.permanent ? "perm" : "live");
+    pill.dataset.ttl = "1";
+    pill.textContent = b.permanent
+      ? "Permanent"
+      : fmtRemaining(b) || "expiring";
+    head.appendChild(pill);
+    card.appendChild(head);
+
+    // The message the blocked user actually sees
+    const msg = divc("bc-msg" + (b.reason ? "" : " none"));
+    msg.appendChild(span("lbl", "Message shown to them"));
+    msg.appendChild(
+      document.createTextNode(
+        b.reason || "No message set. They see a generic ban screen.",
+      ),
+    );
+    card.appendChild(msg);
+
+    // Actions: re-time / edit message (dev), then unban
+    const foot = divc("bc-foot");
+    if (isDev) {
+      const dur = document.createElement("button");
+      dur.className = "btn sm";
+      dur.appendChild(icon("fa-hourglass-half"));
+      dur.appendChild(document.createTextNode(" Change duration"));
+      dur.addEventListener("click", () => openBanDurationMenu(b));
+      foot.appendChild(dur);
+
+      const editMsg = document.createElement("button");
+      editMsg.className = "btn sm";
+      editMsg.appendChild(icon("fa-comment"));
+      editMsg.appendChild(
+        document.createTextNode(b.reason ? " Edit message" : " Add message"),
+      );
+      editMsg.addEventListener("click", () => editBanMessage(b));
+      foot.appendChild(editMsg);
+    }
+    foot.appendChild(span("spacer"));
+    const unban = document.createElement("button");
+    unban.className = "btn sm danger";
+    unban.appendChild(icon("fa-unlock"));
+    unban.appendChild(document.createTextNode(" Unban"));
+    unban.addEventListener("click", async () => {
+      if (!window.StaffUI) {
+        socket.emit("dev unblock ip", { ip: b.ip });
+        return;
+      }
+      const ok = await StaffUI.confirm({
+        title: "Unban",
+        message:
+          "Unblock " + (b.label ? b.label + " (" + b.ip + ")" : b.ip) + "?",
+        confirmText: "Unban",
+      });
+      if (ok) socket.emit("dev unblock ip", { ip: b.ip });
+    });
+    foot.appendChild(unban);
+    card.appendChild(foot);
+    return card;
+  }
+
   function renderBans() {
     const wrap = $("bansList");
     const isDev = me && me.role === "dev";
@@ -557,79 +744,12 @@
       ? bans.length + " active block" + (bans.length === 1 ? "" : "s")
       : "No active blocks";
     if (bans.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.appendChild(icon("fa-circle-check"));
-      empty.appendChild(
-        document.createTextNode("Nobody is currently blocked."),
+      wrap.appendChild(
+        emptyBox("fa-circle-check", "Nobody is currently blocked."),
       );
-      wrap.appendChild(empty);
       return;
     }
-    bans.forEach((b) => {
-      const row = document.createElement("div");
-      row.className = "rowcard";
-      row.dataset.ip = b.ip;
-
-      const av = document.createElement("div");
-      av.className = "avatar";
-      av.style.background = b.permanent ? "var(--red)" : "var(--amber)";
-      av.textContent = initialOf(b.label || b.ip);
-      row.appendChild(av);
-
-      const main = document.createElement("div");
-      main.className = "rc-main";
-      const title = span("rc-title", "");
-      title.textContent = b.label || "Unknown user";
-      main.appendChild(title);
-      const sub = document.createElement("div");
-      sub.className = "rc-sub";
-      if (isDev) {
-        sub.appendChild(span("ip", b.ip));
-        sub.appendChild(document.createTextNode("   "));
-      }
-      if (b.by) sub.appendChild(document.createTextNode("blocked by " + b.by));
-      main.appendChild(sub);
-      const rsn = document.createElement("div");
-      rsn.className = "rc-sub rc-reason" + (b.reason ? "" : " none");
-      rsn.appendChild(icon("fa-quote-left"));
-      rsn.appendChild(
-        document.createTextNode(" " + (b.reason || "No reason given")),
-      );
-      main.appendChild(rsn);
-      row.appendChild(main);
-
-      const actions = document.createElement("div");
-      actions.className = "rc-actions";
-      const pill = document.createElement("span");
-      pill.className = "pill " + (b.permanent ? "perm" : "live");
-      pill.dataset.ttl = "1";
-      pill.textContent = b.permanent
-        ? "Permanent"
-        : fmtRemaining(b) || "expiring";
-      actions.appendChild(pill);
-      const unban = document.createElement("button");
-      unban.className = "btn sm danger";
-      unban.appendChild(icon("fa-unlock"));
-      unban.appendChild(document.createTextNode(" Unban"));
-      unban.addEventListener("click", async () => {
-        if (!window.StaffUI) {
-          socket.emit("dev unblock ip", { ip: b.ip });
-          return;
-        }
-        const ok = await StaffUI.confirm({
-          title: "Unban",
-          message:
-            "Unblock " + (b.label ? b.label + " (" + b.ip + ")" : b.ip) + "?",
-          confirmText: "Unban",
-        });
-        if (ok) socket.emit("dev unblock ip", { ip: b.ip });
-      });
-      actions.appendChild(unban);
-      row.appendChild(actions);
-
-      wrap.appendChild(row);
-    });
+    bans.forEach((b) => wrap.appendChild(buildBanCard(b, isDev)));
     startBanTimer();
   }
   function startBanTimer() {
@@ -638,7 +758,7 @@
       if (tab !== "bans") return;
       let anyLive = false;
       document.querySelectorAll("#bansList .pill[data-ttl]").forEach((pill) => {
-        const ip = pill.closest(".rowcard")?.dataset.ip;
+        const ip = pill.closest(".bancard")?.dataset.ip;
         const b = bans.find((x) => x.ip === ip);
         if (!b || b.permanent) return;
         anyLive = true;
@@ -653,6 +773,127 @@
 
   // ── Moderators tab (dev only) ──
   let modKeys = [];
+  // Turn a last-connected timestamp into a label + freshness colour, so a stale
+  // (long-inactive) mod stands out at a glance.
+  function lastSeenMeta(ts) {
+    if (!ts) return { text: "Never connected", cls: "dim" };
+    const ms = Date.now() - ts;
+    const day = 86400000;
+    let cls = "fresh";
+    if (ms >= 7 * day) cls = "cold";
+    else if (ms >= day) cls = "stale";
+    return { text: relTime(ts), cls };
+  }
+  // One label/value cell in a mod card's stat grid.
+  function modStat(k, v, vCls, title) {
+    const s = divc("mc-stat");
+    s.appendChild(span("mc-k", k));
+    const val = span("mc-v" + (vCls ? " " + vCls : ""), v);
+    if (title) val.title = title;
+    s.appendChild(val);
+    return s;
+  }
+  function buildModCard(k) {
+    const card = divc("modcard");
+
+    const av = divc("avatar");
+    av.style.background = "var(--orange)";
+    av.textContent = initialOf(k.label);
+    card.appendChild(av);
+
+    const main = divc("mc-main");
+    const title = divc("mc-title");
+    title.appendChild(document.createTextNode(k.label || "mod"));
+    title.appendChild(span("chip mod", k.level === 1 ? "MOD L1" : "MOD L2"));
+    main.appendChild(title);
+
+    const grid = divc("mc-grid");
+    const ls = lastSeenMeta(k.lastSeen);
+    grid.appendChild(
+      modStat(
+        "Last seen",
+        ls.text,
+        ls.cls,
+        k.lastSeen ? fmtTime(k.lastSeen) : null,
+      ),
+    );
+    grid.appendChild(
+      modStat(
+        "Granted by",
+        k.grantedBy || "Unknown",
+        k.grantedBy ? null : "dim",
+      ),
+    );
+    grid.appendChild(
+      modStat(
+        "Granted",
+        k.grantedAt ? relTime(k.grantedAt) : "Unknown",
+        k.grantedAt ? null : "dim",
+        k.grantedAt ? fmtTime(k.grantedAt) : null,
+      ),
+    );
+    grid.appendChild(
+      modStat("Key", k.hash ? k.hash.slice(0, 12) + "…" : "?", "mono"),
+    );
+    main.appendChild(grid);
+    card.appendChild(main);
+
+    const actions = divc("rc-actions");
+
+    // Promote (L1 -> L2) / demote (L2 -> L1). Dev only; the tab is dev-gated.
+    const toLevel = k.level === 1 ? 2 : 1;
+    const levelBtn = document.createElement("button");
+    levelBtn.className = "btn sm";
+    levelBtn.appendChild(icon(toLevel === 2 ? "fa-arrow-up" : "fa-arrow-down"));
+    levelBtn.appendChild(
+      document.createTextNode(
+        toLevel === 2 ? " Promote to L2" : " Demote to L1",
+      ),
+    );
+    levelBtn.addEventListener("click", async () => {
+      if (window.StaffUI) {
+        const ok = await StaffUI.confirm({
+          title: toLevel === 2 ? "Promote to L2" : "Demote to L1",
+          message:
+            toLevel === 2
+              ? 'Give "' +
+                (k.label || "mod") +
+                '" full (level 2) powers, including ban and IP block?'
+              : 'Limit "' +
+                (k.label || "mod") +
+                '" to junior (level 1) powers?',
+          confirmText: toLevel === 2 ? "Promote" : "Demote",
+        });
+        if (!ok) return;
+      }
+      socket.emit("dev set mod level", { hash: k.hash, level: toLevel });
+    });
+    actions.appendChild(levelBtn);
+
+    const revoke = document.createElement("button");
+    revoke.className = "btn sm danger";
+    revoke.appendChild(icon("fa-user-xmark"));
+    revoke.appendChild(document.createTextNode(" Revoke"));
+    revoke.addEventListener("click", async () => {
+      if (!window.StaffUI) {
+        socket.emit("dev revoke mod", { hash: k.hash });
+        return;
+      }
+      const ok = await StaffUI.confirm({
+        title: "Revoke mod",
+        message:
+          'Revoke "' +
+          (k.label || "mod") +
+          '" immediately? Their access is removed at once.',
+        danger: true,
+        confirmText: "Revoke",
+      });
+      if (ok) socket.emit("dev revoke mod", { hash: k.hash });
+    });
+    actions.appendChild(revoke);
+    card.appendChild(actions);
+    return card;
+  }
   function renderMods() {
     const wrap = $("modsList");
     wrap.textContent = "";
@@ -661,98 +902,12 @@
       ? modKeys.length + " active mod key" + (modKeys.length === 1 ? "" : "s")
       : "No mod keys yet";
     if (modKeys.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.appendChild(icon("fa-user-shield"));
-      empty.appendChild(
-        document.createTextNode("No moderators yet. Grant one above."),
+      wrap.appendChild(
+        emptyBox("fa-user-shield", "No moderators yet. Grant one above."),
       );
-      wrap.appendChild(empty);
       return;
     }
-    modKeys.forEach((k) => {
-      const row = document.createElement("div");
-      row.className = "rowcard";
-
-      const av = document.createElement("div");
-      av.className = "avatar";
-      av.style.background = "var(--orange)";
-      av.textContent = initialOf(k.label);
-      row.appendChild(av);
-
-      const main = document.createElement("div");
-      main.className = "rc-main";
-      const title = span("rc-title", "");
-      title.appendChild(document.createTextNode(k.label || "mod"));
-      title.appendChild(span("chip mod", k.level === 1 ? "MOD L1" : "MOD L2"));
-      main.appendChild(title);
-      const sub = span(
-        "rc-sub mono",
-        "key " + (k.hash ? k.hash.slice(0, 12) : "?"),
-      );
-      main.appendChild(sub);
-      row.appendChild(main);
-
-      const actions = document.createElement("div");
-      actions.className = "rc-actions";
-
-      // Promote (L1 -> L2) / demote (L2 -> L1). Dev only; the tab is dev-gated.
-      const toLevel = k.level === 1 ? 2 : 1;
-      const levelBtn = document.createElement("button");
-      levelBtn.className = "btn sm";
-      levelBtn.appendChild(
-        icon(toLevel === 2 ? "fa-arrow-up" : "fa-arrow-down"),
-      );
-      levelBtn.appendChild(
-        document.createTextNode(
-          toLevel === 2 ? " Promote to L2" : " Demote to L1",
-        ),
-      );
-      levelBtn.addEventListener("click", async () => {
-        if (window.StaffUI) {
-          const ok = await StaffUI.confirm({
-            title: toLevel === 2 ? "Promote to L2" : "Demote to L1",
-            message:
-              toLevel === 2
-                ? 'Give "' +
-                  (k.label || "mod") +
-                  '" full (level 2) powers, including ban and IP block?'
-                : 'Limit "' +
-                  (k.label || "mod") +
-                  '" to junior (level 1) powers?',
-            confirmText: toLevel === 2 ? "Promote" : "Demote",
-          });
-          if (!ok) return;
-        }
-        socket.emit("dev set mod level", { hash: k.hash, level: toLevel });
-      });
-      actions.appendChild(levelBtn);
-
-      const revoke = document.createElement("button");
-      revoke.className = "btn sm danger";
-      revoke.appendChild(icon("fa-user-xmark"));
-      revoke.appendChild(document.createTextNode(" Revoke"));
-      revoke.addEventListener("click", async () => {
-        if (!window.StaffUI) {
-          socket.emit("dev revoke mod", { hash: k.hash });
-          return;
-        }
-        const ok = await StaffUI.confirm({
-          title: "Revoke mod",
-          message:
-            'Revoke "' +
-            (k.label || "mod") +
-            '" immediately? Their access is removed at once.',
-          danger: true,
-          confirmText: "Revoke",
-        });
-        if (ok) socket.emit("dev revoke mod", { hash: k.hash });
-      });
-      actions.appendChild(revoke);
-      row.appendChild(actions);
-
-      wrap.appendChild(row);
-    });
+    modKeys.forEach((k) => wrap.appendChild(buildModCard(k)));
   }
   async function grantMod() {
     if (!window.StaffUI) return;
@@ -1004,7 +1159,8 @@
         ),
       );
       meta.appendChild(st);
-      if (r.last) meta.appendChild(span(null, "last report " + relTime(r.last)));
+      if (r.last)
+        meta.appendChild(span(null, "last report " + relTime(r.last)));
       idCol.appendChild(meta);
       head.appendChild(idCol);
       card.appendChild(head);
@@ -1360,6 +1516,220 @@
   }
 
   // ── Applications tab (full mods + devs) ──
+  // Status colour, badge tone, header icon, and avatar tint for one application.
+  function appStatusMeta(status) {
+    if (status === "approved")
+      return {
+        cls: "st-approved",
+        badge: "on",
+        icon: "fa-circle-check",
+        av: "var(--green)",
+      };
+    if (status === "rejected")
+      return {
+        cls: "st-rejected",
+        badge: "off",
+        icon: "fa-circle-xmark",
+        av: "#3a3f4a",
+      };
+    return {
+      cls: "st-pending",
+      badge: "warm",
+      icon: "fa-hourglass-half",
+      av: "var(--orange)",
+    };
+  }
+  // reviewedBy is stored as "dev:Label" / "mod:Label"; show just the label.
+  function cleanReviewer(s) {
+    s = String(s || "");
+    const i = s.indexOf(":");
+    return (i >= 0 ? s.slice(i + 1) : s) || s;
+  }
+  // One labelled answer block (question + the applicant's answer).
+  function qaBlock(ic, label, text) {
+    const b = divc("qa");
+    const q = divc("qa-q");
+    q.appendChild(icon(ic));
+    q.appendChild(document.createTextNode(" " + label));
+    b.appendChild(q);
+    const a = divc("qa-a" + (text ? "" : " none"));
+    a.textContent = text || "Not provided";
+    b.appendChild(a);
+    return b;
+  }
+  // Generic Prev / Next pager (shared by the Applications list).
+  function buildPager(page, pages, onGo) {
+    const pager = divc("pager");
+    const mk = (label, faIcon, atEnd, disabled, target) => {
+      const b = document.createElement("button");
+      b.className = "btn sm";
+      b.disabled = disabled;
+      if (!atEnd) b.appendChild(icon(faIcon));
+      b.appendChild(document.createTextNode(label));
+      if (atEnd) b.appendChild(icon(faIcon));
+      if (!disabled) b.addEventListener("click", () => onGo(target));
+      return b;
+    };
+    pager.appendChild(
+      mk(" Prev", "fa-chevron-left", false, page === 0, page - 1),
+    );
+    pager.appendChild(span(null, "Page " + (page + 1) + " of " + pages));
+    pager.appendChild(
+      mk("Next ", "fa-chevron-right", true, page >= pages - 1, page + 1),
+    );
+    return pager;
+  }
+
+  function buildAppCard(a) {
+    const sm = appStatusMeta(a.status);
+    const card = divc("appcard " + sm.cls);
+
+    // Header: avatar, applicant name, status badge, applied-time
+    const head = divc("ac-head");
+    const av = divc("avatar");
+    av.style.background = sm.av;
+    av.textContent = initialOf(a.username);
+    head.appendChild(av);
+    const idc = divc("ac-id");
+    idc.appendChild(span("ac-kicker", "Mod applicant"));
+    idc.appendChild(span("ac-name", a.username || "Anonymous"));
+    const meta = divc("ac-meta");
+    const badge = span("rbadge " + sm.badge);
+    badge.appendChild(icon(sm.icon));
+    badge.appendChild(
+      document.createTextNode(" " + (a.status || "pending").toUpperCase()),
+    );
+    meta.appendChild(badge);
+    if (a.submittedAt) {
+      const t = span(null, "applied " + relTime(a.submittedAt));
+      t.title = fmtTime(a.submittedAt);
+      meta.appendChild(t);
+    }
+    idc.appendChild(meta);
+    head.appendChild(idc);
+    card.appendChild(head);
+
+    // The two application answers, each clearly labelled
+    const qa = divc("ac-qa");
+    qa.appendChild(
+      qaBlock(
+        "fa-circle-question",
+        "Why they want to help",
+        (a.answers && a.answers.why) || "",
+      ),
+    );
+    qa.appendChild(
+      qaBlock(
+        "fa-clock",
+        "Availability",
+        (a.answers && a.answers.availability) || "",
+      ),
+    );
+    card.appendChild(qa);
+
+    // Footer: review outcome + identity, then the action buttons
+    const foot = divc("ac-foot");
+    const info = divc("ac-info");
+    if (a.status !== "pending" && (a.reviewedBy || a.reviewedAt || a.reason)) {
+      const rline = span(null, "");
+      rline.appendChild(
+        document.createTextNode(
+          (a.status === "approved" ? "Approved" : "Rejected") + " ",
+        ),
+      );
+      if (a.reviewedBy) {
+        rline.appendChild(document.createTextNode("by "));
+        const b = document.createElement("b");
+        b.textContent = cleanReviewer(a.reviewedBy);
+        rline.appendChild(b);
+      }
+      if (a.reviewedAt) {
+        const w = span(null, " · " + relTime(a.reviewedAt));
+        w.title = fmtTime(a.reviewedAt);
+        rline.appendChild(w);
+      }
+      info.appendChild(rline);
+      if (a.reason) info.appendChild(span(null, "Reason: " + a.reason));
+      if (a.status === "approved")
+        info.appendChild(
+          span(null, a.claimed ? "Key claimed" : "Key pending claim"),
+        );
+    }
+    // Identity line: device id for all staff, raw IP only when the server sent
+    // one (dev-only), matching the reports board and audit feed.
+    if (a.deviceId || a.ip) {
+      const idLine = span("mono", "");
+      if (a.deviceId)
+        idLine.appendChild(document.createTextNode("id: " + a.deviceId));
+      if (a.ip) {
+        if (a.deviceId) idLine.appendChild(document.createTextNode("   "));
+        idLine.appendChild(document.createTextNode("IP: "));
+        idLine.appendChild(span("ip", a.ip));
+      }
+      info.appendChild(idLine);
+    }
+    foot.appendChild(info);
+
+    if (a.status === "pending") {
+      const actions = divc("ac-actions");
+      const approve = document.createElement("button");
+      approve.className = "btn sm primary";
+      approve.appendChild(icon("fa-check"));
+      approve.appendChild(document.createTextNode(" Approve (L1)"));
+      approve.addEventListener("click", async () => {
+        if (window.StaffUI) {
+          const ok = await StaffUI.confirm({
+            title: "Approve application",
+            message:
+              "Approve " +
+              (a.username || "this user") +
+              " as a junior (L1) moderator? They get a mod key right away.",
+            confirmText: "Approve",
+          });
+          if (!ok) return;
+        }
+        socket.emit("mod application review", {
+          id: a.id,
+          decision: "approve",
+        });
+      });
+      const reject = document.createElement("button");
+      reject.className = "btn sm danger";
+      reject.appendChild(icon("fa-xmark"));
+      reject.appendChild(document.createTextNode(" Reject"));
+      reject.addEventListener("click", async () => {
+        let reason = "";
+        if (window.StaffUI) {
+          reason = await StaffUI.prompt({
+            title: "Reject application",
+            icon: '<i class="fas fa-xmark"></i>',
+            subtitle: a.username || "this user",
+            fields: [
+              {
+                name: "value",
+                label: "Reason (optional, kept private)",
+                type: "text",
+                maxLength: 300,
+              },
+            ],
+            confirmText: "Reject",
+          });
+          if (reason === null) return;
+        }
+        socket.emit("mod application review", {
+          id: a.id,
+          decision: "reject",
+          reason: reason || "",
+        });
+      });
+      actions.appendChild(approve);
+      actions.appendChild(reject);
+      foot.appendChild(actions);
+    }
+    card.appendChild(foot);
+    return card;
+  }
+
   function renderApps() {
     const wrap = $("appsList");
     if (!wrap) return;
@@ -1370,118 +1740,69 @@
     const sub = $("appsSub");
     if (sub)
       sub.textContent = pending.length
-        ? pending.length + " awaiting review"
-        : "No applications awaiting review";
+        ? pending.length +
+          " awaiting review" +
+          (applicationsList.length > pending.length
+            ? "  ·  " + applicationsList.length + " total"
+            : "")
+        : applicationsList.length
+          ? "No applications awaiting review  ·  " +
+            applicationsList.length +
+            " total"
+          : "No applications yet";
+
     if (applicationsList.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.appendChild(icon("fa-user-pen"));
-      empty.appendChild(document.createTextNode("No applications yet."));
-      wrap.appendChild(empty);
+      wrap.appendChild(emptyBox("fa-user-pen", "No applications yet."));
       return;
     }
-    applicationsList.forEach((a) => {
-      const row = document.createElement("div");
-      row.className = "rowcard";
-      const av = document.createElement("div");
-      av.className = "avatar";
-      av.style.background =
-        a.status === "pending" ? "var(--orange)" : "#3a3f4a";
-      av.textContent = initialOf(a.username);
-      row.appendChild(av);
 
-      const main = document.createElement("div");
-      main.className = "rc-main";
-      const title = span("rc-title", "");
-      title.appendChild(document.createTextNode(a.username || "Anonymous"));
-      const chipCls =
-        a.status === "pending"
-          ? "chip mod"
-          : a.status === "approved"
-            ? "chip dev"
-            : "chip";
-      title.appendChild(span(chipCls, (a.status || "").toUpperCase()));
-      main.appendChild(title);
-      const why = (a.answers && a.answers.why) || "(no reason given)";
-      const avail = (a.answers && a.answers.availability) || "";
-      main.appendChild(
-        span("rc-sub", why + (avail ? "  ·  avail: " + avail : "")),
+    // Filter by the active status segment, then by the search box.
+    let list = applicationsList.slice();
+    if (appsFilter !== "all")
+      list = list.filter((a) => (a.status || "pending") === appsFilter);
+    if (appsQuery)
+      list = list.filter((a) =>
+        [
+          a.username,
+          a.answers && a.answers.why,
+          a.answers && a.answers.availability,
+          a.reason,
+          a.reviewedBy,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(appsQuery),
       );
-      main.appendChild(
-        span(
-          "rc-sub mono",
-          new Date(a.submittedAt).toLocaleString() +
-            (a.reviewedBy ? "  ·  by " + a.reviewedBy : "") +
-            (a.reason ? "  ·  " + a.reason : ""),
+
+    if (list.length === 0) {
+      wrap.appendChild(
+        emptyBox(
+          "fa-filter-circle-xmark",
+          appsQuery
+            ? "No applications match your search."
+            : "No " +
+                (appsFilter === "all" ? "" : appsFilter + " ") +
+                "applications.",
         ),
       );
-      // Identity line, consistent with the audit feed and reports board: the
-      // device id shows for all staff; the IP is only present for devs (the
-      // server omits it for mods).
-      const idBits = [];
-      if (a.deviceId) idBits.push("id: " + a.deviceId);
-      if (a.ip) idBits.push("IP: " + a.ip);
-      if (idBits.length) main.appendChild(span("rc-sub mono", idBits.join("  ·  ")));
-      row.appendChild(main);
+      return;
+    }
 
-      if (a.status === "pending") {
-        const actions = document.createElement("div");
-        actions.className = "rc-actions";
-        const approve = document.createElement("button");
-        approve.className = "btn sm primary";
-        approve.appendChild(icon("fa-check"));
-        approve.appendChild(document.createTextNode(" Approve (L1)"));
-        approve.addEventListener("click", async () => {
-          if (window.StaffUI) {
-            const ok = await StaffUI.confirm({
-              title: "Approve application",
-              message:
-                "Approve " +
-                (a.username || "this user") +
-                " as a junior (L1) moderator? They get a mod key right away.",
-              confirmText: "Approve",
-            });
-            if (!ok) return;
-          }
-          socket.emit("mod application review", {
-            id: a.id,
-            decision: "approve",
-          });
-        });
-        const reject = document.createElement("button");
-        reject.className = "btn sm danger";
-        reject.appendChild(icon("fa-xmark"));
-        reject.appendChild(document.createTextNode(" Reject"));
-        reject.addEventListener("click", async () => {
-          let reason = "";
-          if (window.StaffUI) {
-            reason = await StaffUI.prompt({
-              title: "Reject application",
-              icon: '<i class="fas fa-xmark"></i>',
-              fields: [
-                {
-                  name: "value",
-                  label: "Reason (optional, kept private)",
-                  type: "text",
-                  maxLength: 300,
-                },
-              ],
-              confirmText: "Reject",
-            });
-            if (reason === null) return;
-          }
-          socket.emit("mod application review", {
-            id: a.id,
-            decision: "reject",
-            reason: reason || "",
-          });
-        });
-        actions.appendChild(approve);
-        actions.appendChild(reject);
-        row.appendChild(actions);
-      }
-      wrap.appendChild(row);
-    });
+    const pages = Math.max(1, Math.ceil(list.length / APPS_PAGE));
+    if (appsPage >= pages) appsPage = pages - 1;
+    if (appsPage < 0) appsPage = 0;
+    const start = appsPage * APPS_PAGE;
+    list
+      .slice(start, start + APPS_PAGE)
+      .forEach((a) => wrap.appendChild(buildAppCard(a)));
+    if (pages > 1)
+      wrap.appendChild(
+        buildPager(appsPage, pages, (p) => {
+          appsPage = p;
+          renderApps();
+        }),
+      );
   }
 
   // ── Sessions tab (dev only): who is connected on which staff key ──
@@ -1899,6 +2220,29 @@
     $("invitesRefresh").addEventListener("click", () => {
       inviteDetails.clear();
       socket.emit("staff get invite report");
+    });
+
+  // Applications: status segment + live search (own debounce, own page reset).
+  document.querySelectorAll("#appsSeg button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document
+        .querySelectorAll("#appsSeg button")
+        .forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      appsFilter = btn.dataset.s || "pending";
+      appsPage = 0;
+      renderApps();
+    });
+  });
+  let appsSearchDebounce = null;
+  $("appsSearch") &&
+    $("appsSearch").addEventListener("input", () => {
+      clearTimeout(appsSearchDebounce);
+      appsSearchDebounce = setTimeout(() => {
+        appsQuery = $("appsSearch").value.trim().toLowerCase();
+        appsPage = 0;
+        renderApps();
+      }, 200);
     });
 
   let searchDebounce = null;

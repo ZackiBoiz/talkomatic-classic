@@ -16,7 +16,7 @@ const MOD_KEYS_PATH = path.join(__dirname, "..", "mod-keys.json");
 const MODLOG_PATH = path.join(__dirname, "..", "modlog.txt");
 const KEY_ACTIVITY_PATH = path.join(__dirname, "..", "key-activity.json");
 
-// In-memory mirror of mod-keys.json: [{ hash, label }]
+// In-memory mirror of mod-keys.json: [{ hash, label, level, grantedBy, grantedAt }]
 let modKeys = [];
 
 // Which IPs each staff key has ever connected from, persisted so a leaked key
@@ -53,6 +53,9 @@ function loadModKeys() {
             hash: k.hash,
             label: String(k.label || "mod"),
             level: normalizeLevel(k.level),
+            // Who minted the key and when. Older keys predate this and stay null.
+            grantedBy: k.grantedBy ? String(k.grantedBy) : null,
+            grantedAt: typeof k.grantedAt === "number" ? k.grantedAt : null,
           }))
       : [];
   } catch (err) {
@@ -133,7 +136,9 @@ function validateKey(key) {
 // New grants default to a junior (level 1) key - least privilege - unless the
 // caller asks for a full (level 2) key. (Note this differs from loadModKeys,
 // where a *missing* level means an old full key.)
-async function grantModKey(label, level) {
+// `grantedBy` is a human label (the granting dev, or the reviewer who approved
+// an application) kept so the Moderators panel can show who made each mod.
+async function grantModKey(label, level, grantedBy) {
   const key = "mk_" + crypto.randomBytes(24).toString("hex");
   const entry = {
     hash: hashKey(key),
@@ -141,6 +146,10 @@ async function grantModKey(label, level) {
       .trim()
       .slice(0, 40) || "mod",
     level: normalizeLevel(level == null ? 1 : level),
+    grantedBy: grantedBy
+      ? String(grantedBy).trim().slice(0, 60) || null
+      : null,
+    grantedAt: Date.now(),
   };
   modKeys.push(entry);
   await saveModKeys();
@@ -165,12 +174,29 @@ async function setModLevel(hash, level) {
   return mk.level;
 }
 
-// Hashes + levels only - safe to send to the dev panel.
+// Most recent time any IP connected on this key, from the persisted
+// key-activity log. Null when the key has never been used. Lets the Moderators
+// panel show how long a mod has been inactive without tracking sockets.
+function lastSeenForHash(hash) {
+  const rec = keyActivity[hash];
+  if (!rec || !rec.ips) return null;
+  let last = 0;
+  for (const ip in rec.ips) {
+    const m = rec.ips[ip];
+    if (m && m.last && m.last > last) last = m.last;
+  }
+  return last || null;
+}
+
+// Hashes, levels, provenance, and last-seen - safe to send to the dev panel.
 function listModKeys() {
   return modKeys.map((k) => ({
     hash: k.hash,
     label: k.label,
     level: normalizeLevel(k.level),
+    grantedBy: k.grantedBy || null,
+    grantedAt: k.grantedAt || null,
+    lastSeen: lastSeenForHash(k.hash),
   }));
 }
 

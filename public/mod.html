@@ -1171,6 +1171,324 @@
         font-weight: bold;
       }
 
+      /* ── Applications (rich review cards) ── */
+      .appcard {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--dim2);
+        overflow: hidden;
+        transition: border-color 0.2s ease;
+      }
+      .appcard:hover {
+        border-color: var(--orange);
+      }
+      .appcard.st-pending {
+        border-left-color: var(--amber);
+      }
+      .appcard.st-approved {
+        border-left-color: var(--green);
+      }
+      .appcard.st-rejected {
+        border-left-color: var(--red);
+      }
+      .ac-head {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 15px 17px 12px;
+        flex-wrap: wrap;
+      }
+      .ac-head .avatar {
+        width: 46px;
+        height: 46px;
+        font-size: 19px;
+        border-radius: 10px;
+      }
+      .ac-id {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+        flex: 1;
+      }
+      .ac-kicker {
+        font-size: 10.5px;
+        font-weight: bold;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
+        color: var(--dim2);
+      }
+      .ac-name {
+        font-size: 19px;
+        font-weight: bold;
+        color: var(--txt);
+        word-break: break-word;
+        line-height: 1.2;
+      }
+      .ac-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--dim2);
+      }
+      .ac-qa {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 10px;
+        padding: 0 17px 4px;
+      }
+      .qa {
+        background: var(--panel2);
+        border: 1px solid var(--line-soft);
+        border-radius: 8px;
+        padding: 11px 13px;
+      }
+      .qa-q {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 11.5px;
+        font-weight: bold;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        color: var(--orange);
+        margin-bottom: 5px;
+      }
+      .qa-a {
+        font-size: 13.5px;
+        color: var(--txt);
+        line-height: 1.55;
+        word-break: break-word;
+        white-space: pre-wrap;
+      }
+      .qa-a.none {
+        color: var(--dim2);
+        font-style: italic;
+      }
+      .ac-foot {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 12px 17px;
+        margin-top: 8px;
+        border-top: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .ac-info {
+        font-size: 12px;
+        color: var(--dim2);
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+        flex: 1;
+      }
+      .ac-info .mono {
+        color: var(--dim);
+        word-break: break-all;
+      }
+      .ac-info .ip {
+        color: var(--amber);
+      }
+      .ac-info b {
+        color: var(--txt);
+      }
+      .ac-actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-left: auto;
+      }
+      .pager {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        margin-top: 18px;
+        color: var(--dim);
+        font-size: 13px;
+      }
+
+      /* ── Moderators (key cards with provenance + activity) ── */
+      .modcard {
+        display: flex;
+        align-items: flex-start;
+        gap: 15px;
+        flex-wrap: wrap;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 15px 17px;
+        transition: border-color 0.2s ease;
+      }
+      .modcard:hover {
+        border-color: var(--orange);
+      }
+      .modcard .avatar {
+        width: 44px;
+        height: 44px;
+        font-size: 18px;
+      }
+      .mc-main {
+        display: flex;
+        flex-direction: column;
+        gap: 11px;
+        min-width: 0;
+        flex: 1;
+      }
+      .mc-title {
+        font-weight: bold;
+        font-size: 17px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        flex-wrap: wrap;
+      }
+      .mc-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 9px 16px;
+      }
+      .mc-stat {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .mc-k {
+        font-size: 10.5px;
+        font-weight: bold;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        color: var(--dim2);
+      }
+      .mc-v {
+        font-size: 13.5px;
+        color: var(--txt);
+        word-break: break-word;
+      }
+      .mc-v.mono {
+        font-size: 12.5px;
+        color: var(--dim);
+      }
+      .mc-v.fresh {
+        color: var(--green);
+      }
+      .mc-v.stale {
+        color: var(--amber);
+      }
+      .mc-v.cold {
+        color: var(--red);
+      }
+      .mc-v.dim {
+        color: var(--dim2);
+      }
+      .modcard .rc-actions {
+        margin-left: auto;
+        align-self: center;
+      }
+
+      /* ── Ban list (cards with editable message + retime) ── */
+      .bancard {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--amber);
+        border-radius: 10px;
+        overflow: hidden;
+        transition: border-color 0.2s ease;
+      }
+      .bancard:hover {
+        border-color: var(--orange);
+      }
+      .bancard.perm {
+        border-left-color: var(--red);
+      }
+      .bc-head {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 14px 16px 10px;
+        flex-wrap: wrap;
+      }
+      .bc-head .avatar {
+        width: 44px;
+        height: 44px;
+        font-size: 18px;
+        border-radius: 10px;
+      }
+      .bc-id {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+        flex: 1;
+      }
+      .bc-name {
+        font-size: 17px;
+        font-weight: bold;
+        color: var(--txt);
+        word-break: break-word;
+      }
+      .bc-meta {
+        display: flex;
+        align-items: center;
+        gap: 6px 14px;
+        flex-wrap: wrap;
+        font-size: 12px;
+        color: var(--dim2);
+        margin-top: 2px;
+      }
+      .bc-meta .ip {
+        color: var(--amber);
+      }
+      .bc-meta b {
+        color: var(--dim);
+        font-weight: bold;
+      }
+      .bc-msg {
+        margin: 0 16px 12px;
+        padding: 10px 13px;
+        background: var(--panel2);
+        border: 1px solid var(--line-soft);
+        border-radius: 8px;
+        font-size: 13.5px;
+        color: var(--txt);
+        line-height: 1.5;
+        word-break: break-word;
+        white-space: pre-wrap;
+      }
+      .bc-msg .lbl {
+        display: block;
+        font-size: 10.5px;
+        font-weight: bold;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        color: var(--dim2);
+        margin-bottom: 4px;
+        white-space: normal;
+      }
+      .bc-msg.none {
+        color: var(--dim2);
+        font-style: italic;
+      }
+      .bc-foot {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        padding: 12px 16px;
+        border-top: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .bc-foot .spacer {
+        flex: 1;
+      }
+
       /* ── Responsive ── */
       @media (max-width: 768px) {
         .header {
@@ -1194,6 +1512,21 @@
         }
         .panel-head h1 {
           font-size: 20px;
+        }
+      }
+      @media (max-width: 600px) {
+        /* Drop the mod card's inline actions onto their own full-width row so
+           the stat grid keeps the space it needs and never overlaps. */
+        .mc-main {
+          flex: 1 1 calc(100% - 60px);
+        }
+        .modcard .rc-actions {
+          margin-left: 0;
+          flex-basis: 100%;
+        }
+        .ac-actions {
+          margin-left: 0;
+          flex-basis: 100%;
         }
       }
     </style>
@@ -1360,10 +1693,10 @@
               A pending invite only counts after a real-visitor signal (a chosen
               username plus a real session) and expires on its own after a week,
               so a drive-by invite-link bot earns nothing. Listed here are
-              inviters whose pending invites still look automated. Investigate to
-              see the pattern, then remove a flagged cluster. Active invites are
-              never touched, every removal is logged, and a developer can undo
-              it, so a clean inviter is never hurt by a mistake.
+              inviters whose pending invites still look automated. Investigate
+              to see the pattern, then remove a flagged cluster. Active invites
+              are never touched, every removal is logged, and a developer can
+              undo it, so a clean inviter is never hurt by a mistake.
             </span>
           </p>
           <div id="invitesList" class="cards"></div>
@@ -1380,6 +1713,32 @@
               <button id="appsRefresh" class="btn sm">
                 <i class="fas fa-arrows-rotate"></i> Refresh
               </button>
+            </div>
+          </div>
+          <p class="reports-note">
+            <i class="fas fa-circle-info"></i>
+            <span>
+              Each card is one person applying for the junior (L1) role. Read
+              why they want to help and their availability, then approve to mint
+              and deliver their key automatically, or decline with an optional
+              private reason. Applications are never auto-accepted; a human
+              always reviews.
+            </span>
+          </p>
+          <div class="toolbar">
+            <div class="search-wrap">
+              <i class="fas fa-magnifying-glass"></i>
+              <input
+                id="appsSearch"
+                class="search"
+                placeholder="Search applicant, reason, or availability"
+              />
+            </div>
+            <div class="seg" id="appsSeg">
+              <button class="active" data-s="pending">Pending</button>
+              <button data-s="approved">Approved</button>
+              <button data-s="rejected">Rejected</button>
+              <button data-s="all">All</button>
             </div>
           </div>
           <div id="appsList" class="cards"></div>
@@ -1618,6 +1977,6 @@
 
     <script src="/socket.io/socket.io.js"></script>
     <script src="js/staff-ui.js?v=1.5.0"></script>
-    <script src="js/mod.js?v=3.5.3"></script>
+    <script src="js/mod.js?v=3.6.0"></script>
   </body>
 </html>

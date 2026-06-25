@@ -871,6 +871,7 @@ function buildBlockList() {
       reason: (b && b.reason) || null,
       permanent: expiry >= Number.MAX_SAFE_INTEGER,
       expiry: expiry || 0,
+      ts: (b && typeof b === "object" && b.ts) || null,
     });
   }
   return out;
@@ -1899,8 +1900,15 @@ function registerSocketHandlers() {
     if (socket.deviceId && !socket.isDev && !socket.isMod) {
       const claim = applications.unclaimedApproved(socket.deviceId);
       if (claim) {
+        // reviewedBy is stored as "dev:Label" / "mod:Label"; keep just the label
+        // so the Moderators panel credits the reviewer who approved them.
+        const reviewedBy = String(claim.reviewedBy || "");
+        const grantedBy =
+          (reviewedBy.includes(":")
+            ? reviewedBy.slice(reviewedBy.indexOf(":") + 1)
+            : reviewedBy) || "application";
         roles
-          .grantModKey(claim.username || "mod", 1)
+          .grantModKey(claim.username || "mod", 1, grantedBy)
           .then((g) => {
             applications.markClaimed(claim.id);
             socket.emit("you are now mod", {
@@ -4387,6 +4395,107 @@ function registerSocketHandlers() {
       }),
     );
 
+    // ── Adjust an existing IP block: shorten / extend its duration (dev) ──
+    // Re-times a live block from now, preserving who placed it, the name, and
+    // the message. Lets a dev reduce an over-long ban without lifting it first.
+    socket.on(
+      "dev set block duration",
+      safe(async (data) => {
+        if (!requireDev(socket)) return;
+        const ip = typeof data?.ip === "string" ? data.ip.trim() : "";
+        if (!ip)
+          return socket.emit(
+            "error",
+            createErrorResponse(ERROR_CODES.BAD_REQUEST, "IP required."),
+          );
+        const existing = state.blockedIPs.get(ip);
+        if (!existing)
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.NOT_FOUND,
+              "No active block on that IP.",
+            ),
+          );
+        const DURATIONS = { "1h": 3600000, "24h": 86400000, "7d": 604800000 };
+        const duration = data?.duration;
+        let expiry;
+        if (duration === "permanent") {
+          expiry = Number.MAX_SAFE_INTEGER;
+        } else if (DURATIONS[duration] !== undefined) {
+          expiry = Date.now() + DURATIONS[duration];
+        } else {
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.BAD_REQUEST,
+              "Invalid duration. Use 1h, 24h, 7d, or permanent.",
+            ),
+          );
+        }
+        // Legacy entries may be a bare expiry number; normalize to an object.
+        const rec =
+          typeof existing === "object" && existing
+            ? existing
+            : { label: null, by: null, reason: null, ts: Date.now() };
+        rec.expiry = expiry;
+        state.blockedIPs.set(ip, rec);
+        blocklist.saveSoon();
+        broadcastBlockList();
+        logStaff(socket, `set block duration ${duration}`, ip, "-");
+        socket.emit("staff action result", {
+          action: "set block duration",
+          ok: true,
+          ip,
+        });
+        socket.emit("dev blocks", buildBlockList());
+      }),
+    );
+
+    // ── Edit the message a blocked user sees on the ban screen (dev) ──────
+    // The reason is surfaced to the blocked connection (server.js middleware),
+    // so this doubles as a way to leave them a note or appeal instructions.
+    socket.on(
+      "dev set block message",
+      safe(async (data) => {
+        if (!requireDev(socket)) return;
+        const ip = typeof data?.ip === "string" ? data.ip.trim() : "";
+        if (!ip)
+          return socket.emit(
+            "error",
+            createErrorResponse(ERROR_CODES.BAD_REQUEST, "IP required."),
+          );
+        const existing = state.blockedIPs.get(ip);
+        if (!existing)
+          return socket.emit(
+            "error",
+            createErrorResponse(
+              ERROR_CODES.NOT_FOUND,
+              "No active block on that IP.",
+            ),
+          );
+        const reason =
+          sanitizeMessage(
+            typeof data?.reason === "string" ? data.reason : "",
+          ).slice(0, 500) || null;
+        const rec =
+          typeof existing === "object" && existing
+            ? existing
+            : { expiry: existing, label: null, by: null, ts: Date.now() };
+        rec.reason = reason;
+        state.blockedIPs.set(ip, rec);
+        blocklist.saveSoon();
+        broadcastBlockList();
+        logStaff(socket, "set block message", ip, "-", reason || "(cleared)");
+        socket.emit("staff action result", {
+          action: "set block message",
+          ok: true,
+          ip,
+        });
+        socket.emit("dev blocks", buildBlockList());
+      }),
+    );
+
     // ── Role management: grant / revoke / list mod keys (dev) ───────────
     socket.on(
       "dev grant mod",
@@ -4395,7 +4504,11 @@ function registerSocketHandlers() {
         const label = typeof data?.label === "string" ? data.label : "mod";
         // Devs grant a full (level 2) key by default; level 1 on request.
         const level = data?.level === 1 ? 1 : 2;
-        const granted = await roles.grantModKey(label, level);
+        const granted = await roles.grantModKey(
+          label,
+          level,
+          socket.staffLabel || "dev",
+        );
         logStaff(
           socket,
           `grant mod L${granted.level}`,
@@ -4836,7 +4949,11 @@ function registerSocketHandlers() {
             if (s.deviceId === app.deviceId && !s.isDev && !s.isMod)
               targets.push(s);
           if (targets.length) {
-            const granted = await roles.grantModKey(app.username || "mod", 1);
+            const granted = await roles.grantModKey(
+              app.username || "mod",
+              1,
+              socket.staffLabel || "dev",
+            );
             for (const s of targets)
               s.emit("you are now mod", {
                 key: granted.key,
@@ -5226,7 +5343,11 @@ function registerSocketHandlers() {
           targetUser?.username ||
           "mod";
         label = label.slice(0, 40);
-        const granted = await roles.grantModKey(label, grantLevel);
+        const granted = await roles.grantModKey(
+          label,
+          grantLevel,
+          socket.staffLabel || "dev",
+        );
         for (const s of targets)
           s.emit("you are now mod", {
             key: granted.key,
