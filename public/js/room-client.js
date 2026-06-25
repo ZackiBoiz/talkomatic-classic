@@ -1812,22 +1812,25 @@ socket.on("dev hide status", (data) => {
 // Small device-type indicator shown at the left of each user row. Derived from
 // the user agent on the server, purely cosmetic.
 const DEVICE_META = {
-  desktop: { icon: "fa-desktop", title: "Computer" },
-  mobile: { icon: "fa-mobile-screen-button", title: "Mobile" },
-  tablet: { icon: "fa-tablet-screen-button", title: "Tablet" },
-  tv: { icon: "fa-tv", title: "TV" },
-  vr: { icon: "fa-vr-cardboard", title: "VR" },
-  console: { icon: "fa-gamepad", title: "Console" },
-  watch: { icon: "fa-clock", title: "Watch" },
-  ereader: { icon: "fa-book-atlas", title: "E-Reader" },
-  car: { icon: "fa-car", title: "Car" },
-  bot: { icon: "fa-robot", title: "Bot" },
-  unknown: { icon: "fa-circle-question", title: "Unknown" },
+  desktop: { icon: "fas fa-desktop", title: "Desktop" },
+  mobile: { icon: "fas fa-mobile-screen-button", title: "Mobile" },
+  tablet: { icon: "fas fa-tablet-screen-button", title: "Tablet" },
+  tv: { icon: "fas fa-tv", title: "TV" },
+  vr: { icon: "fas fa-vr-cardboard", title: "VR" },
+  console: { icon: "fas fa-gamepad", title: "Console" },
+  watch: { icon: "fas fa-clock", title: "Watch" },
+  ereader: { icon: "fas fa-book-atlas", title: "E-Reader" },
+  car: { icon: "fas fa-car", title: "Car" },
+  raspi: { icon: "fab fa-raspberry-pi", title: "Raspberry Pi" }, // this uses fab instead of fas
+  projector: { icon: "fas fa-film", title: "Projector" },
+  refrigerator: { icon: "fas fa-snowflake", title: "Refrigerator" },
+  bot: { icon: "fas fa-robot", title: "Bot" },
+  unknown: { icon: "fas fa-circle-question", title: "Unknown" },
 };
 function deviceIconFor(type) {
   const m = DEVICE_META[type] || DEVICE_META.unknown;
   const i = document.createElement("i");
-  i.className = "fas " + m.icon + " device-icon";
+  i.className = m.icon + " device-icon";
   i.title = m.title;
   i.setAttribute("aria-hidden", "true");
   return i;
