@@ -34,7 +34,7 @@ class Piano {
     this.volume = 0.85;
     this.samplesReady = false;
     this.loadingSamples = false;
-    this.MAX_VOICES = 48; // hard polyphony cap; oldest voice is stolen past this
+    this.MAX_VOICES = 64; // hard polyphony cap; oldest voice is stolen past this
 
     // ── Sound settings (synth/mixer) ────────────────────────────────────
     this.instrument = "piano"; // "piano" | "synth"
@@ -518,6 +518,20 @@ class Piano {
     return `hsl(${((21 + index) % 12) * 30}, 85%, 58%)`;
   }
 
+  // The color to light a key with: the color of whoever is pressing it (the most
+  // recent holder), so each player's notes show in their own color. Falls back
+  // to null when no one holds the key.
+  pressColor(index) {
+    const holders = this.keyHolders.get(index);
+    if (!holders || holders.size === 0) return null;
+    let owner = null;
+    let latest = -1;
+    for (const [o, t] of holders) {
+      if (t >= latest) { latest = t; owner = o; }
+    }
+    return this.userColor(owner === "self" ? this.userId : owner);
+  }
+
   // Record press/release as data only; the actual DOM write is batched in a
   // single rAF pass per frame, so 1000 notes/sec still cost one repaint a frame.
   lightKey(index, on, owner) {
@@ -541,7 +555,7 @@ class Piano {
       if (!el) continue;
       const holders = this.keyHolders.get(idx);
       if (holders && holders.size > 0) {
-        el.style.setProperty("--press", this.noteColor(idx));
+        el.style.setProperty("--press", this.pressColor(idx) || this.noteColor(idx));
         if (!el.classList.contains("pressed")) el.classList.add("pressed");
       } else {
         el.classList.remove("pressed");
@@ -574,8 +588,11 @@ class Piano {
       });
     }
     const ctxNow = this.audioCtx ? this.audioCtx.currentTime : 0;
+    // Safety net for a voice whose note-off never arrived. Generous (30s) so a
+    // genuinely sustained note (pedal / long synth pad) is not cut mid-play;
+    // real note-offs are always relayed, so true stuck notes are rare.
     for (const [key, v] of this.voices) {
-      if (ctxNow - v.t > 14) { this._fade(v, 0.2); this.voices.delete(key); }
+      if (ctxNow - v.t > 30) { this._fade(v, 0.2); this.voices.delete(key); }
     }
   }
 
@@ -785,7 +802,7 @@ class Piano {
     // Re-apply any keys that are currently held (after a responsive rebuild).
     for (const [idx, holders] of this.keyHolders) {
       if (holders.size > 0 && this.keyEls[idx]) {
-        this.keyEls[idx].style.setProperty("--press", this.noteColor(idx));
+        this.keyEls[idx].style.setProperty("--press", this.pressColor(idx) || this.noteColor(idx));
         this.keyEls[idx].classList.add("pressed");
       }
     }
@@ -895,9 +912,20 @@ class Piano {
     this.chatInput.placeholder = "Say something…";
     this.chatInput.maxLength = 200;
     this.chatInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && this.chatInput.value.trim()) {
-        this.sendChat(this.chatInput.value.trim());
+      if (e.key === "Enter") {
+        const v = this.chatInput.value.trim();
+        if (v) this.sendChat(v);
         this.chatInput.value = "";
+        // Hand focus back to the keyboard so you can play again immediately,
+        // instead of staying stuck in the input (which made the keys feel dead).
+        this.chatInput.blur();
+        chat.classList.remove("active");
+      } else if (e.key === "Escape") {
+        // Cancel typing and return to playing.
+        this.chatInput.value = "";
+        this.chatInput.blur();
+        chat.classList.remove("active");
+        e.preventDefault();
       }
       e.stopPropagation();
     });
@@ -1550,6 +1578,16 @@ class Piano {
         if (this.soundPanel.classList.contains("show") || this.helpPanel.classList.contains("show") || this.peoplePanel.classList.contains("show")) {
           this.closePanels();
         } else { this.close(); }
+        return;
+      }
+      if (e.code === "Enter") {
+        // Enter (while playing) jumps focus into the chat so you can type without
+        // the mouse; Enter from the input sends and returns focus to the keys.
+        e.preventDefault();
+        if (this.mode !== "solo" && this.chatInput) {
+          if (this.chatEl) this.chatEl.classList.add("active");
+          this.chatInput.focus();
+        }
         return;
       }
       if (e.code === "Space") { e.preventDefault(); this.setSustain(true); return; }

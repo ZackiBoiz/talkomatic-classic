@@ -76,6 +76,9 @@ function gracefulFlush() {
   try {
     require("./server/warnings").flushSync();
   } catch (e) {}
+  try {
+    rooms.saveBoardSync(); // persist Talkoboard strokes across the restart
+  } catch (e) {}
 }
 let shuttingDown = false;
 function beginShutdown(signal) {
@@ -411,6 +414,11 @@ io.use((socket, next) => {
               "disconnect",
               "disconnecting",
               "typing",
+              // Piano note batches are a real-time stream (~18/sec while playing)
+              // with their own dedicated flood caps (msgs/sec, notes/sec, and
+              // per-message), so the blunt generic limiter must not drop them -
+              // that is what made notes cut out during active play.
+              "piano notes",
               "get rooms",
               "get room state",
             ].includes(evt)
@@ -724,6 +732,7 @@ app.post(`${API}/rooms/:id/join`, apiAuth, async (req, res) => {
 
 async function start() {
   await rooms.loadRooms();
+  rooms.loadBoard(); // restore saved Talkoboard strokes for the loaded rooms
   rooms.registerSocketHandlers();
   rooms.startCleanupIntervals();
 

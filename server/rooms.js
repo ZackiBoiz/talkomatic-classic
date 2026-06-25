@@ -159,6 +159,7 @@ function finalizeBoardUserStroke(roomId, userId) {
     if (bs.strokes.length > MAX_BOARD_STROKES) {
       bs.strokes = bs.strokes.slice(-MAX_BOARD_STROKES);
     }
+    saveBoardSoon();
   }
   bs.active.delete(userId);
 }
@@ -174,6 +175,79 @@ function sanitizeGradient(g) {
     if (out.length >= 8) break;
   }
   return out.length >= 2 ? out : null;
+}
+
+// ── Talkoboard persistence ──────────────────────────────────────────────────
+// The board lives in memory; persist each room's FINALIZED strokes (not the
+// in-progress ones) to disk so a restart or redeploy keeps the drawing instead
+// of wiping it. Mirrors the room save: atomic tmp+rename, debounced during
+// normal use, with a synchronous flush on a clean shutdown.
+const BOARD_PATH = path.join(__dirname, "..", "board.json");
+let boardSavePending = false;
+
+function serializeBoards() {
+  const out = {};
+  for (const [roomId, bs] of boardState) {
+    if (bs && Array.isArray(bs.strokes) && bs.strokes.length) {
+      out[roomId] = bs.strokes;
+    }
+  }
+  return out;
+}
+
+async function saveBoard() {
+  try {
+    const tmp = BOARD_PATH + ".tmp";
+    await fs.writeFile(tmp, JSON.stringify(serializeBoards()), "utf8");
+    await fs.rename(tmp, BOARD_PATH);
+  } catch (e) {
+    console.error("Error saving board:", e);
+  }
+}
+
+// Debounced save, so a burst of strokes writes once rather than per stroke.
+function saveBoardSoon() {
+  if (boardSavePending) return;
+  boardSavePending = true;
+  setTimeout(() => {
+    boardSavePending = false;
+    saveBoard().catch(() => {});
+  }, 10000);
+}
+
+// Synchronous flush for a clean shutdown (mirrors the other stores), so strokes
+// drawn seconds before a restart are not lost in the debounce window.
+function saveBoardSync() {
+  try {
+    const fsSync = require("fs");
+    const tmp = BOARD_PATH + ".tmp";
+    fsSync.writeFileSync(tmp, JSON.stringify(serializeBoards()), "utf8");
+    fsSync.renameSync(tmp, BOARD_PATH);
+  } catch (e) {
+    console.error("Board flush failed:", e);
+  }
+}
+
+// Restore saved strokes on boot, only for rooms that still exist (so a deleted
+// room's board does not linger). Must run AFTER loadRooms().
+function loadBoard() {
+  try {
+    const raw = require("fs").readFileSync(BOARD_PATH, "utf8");
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== "object") return;
+    let n = 0;
+    for (const [roomId, strokes] of Object.entries(obj)) {
+      if (!state.rooms.has(roomId) || !Array.isArray(strokes)) continue;
+      boardState.set(roomId, {
+        strokes: strokes.slice(-MAX_BOARD_STROKES),
+        active: new Map(),
+      });
+      n++;
+    }
+    if (n) console.log(`Loaded board strokes for ${n} room(s).`);
+  } catch (err) {
+    if (err.code !== "ENOENT") console.error("Error loading board:", err);
+  }
 }
 
 // ── Multiplayer Piano: Server-Side Room State (ephemeral) ───────────────────
@@ -660,6 +734,9 @@ function sendAppsList(s) {
       reviewedAt: a.reviewedAt,
       reason: a.reason,
       claimed: a.claimed,
+      // Applicant identity, shown to all staff (same as the reports board); the
+      // raw IP stays dev-only, matching how the audit feed is redacted for mods.
+      deviceId: a.deviceId || null,
       ip: isDev ? a.ip : undefined,
     })),
   );
@@ -1308,6 +1385,7 @@ function setupAFKTimers(socket, userId) {
   if (!socket || !socket.roomId) return;
   if (socket.isDev || socket.isMod) return; // staff bypass AFK
   if (socket.boardOpen) return; // drawing on the board counts as active
+  if (socket.pianoOpen) return; // playing the piano counts as active
 
   state.afkWarningTimers.set(
     userId,
@@ -2216,6 +2294,7 @@ function registerSocketHandlers() {
         );
         if (idx !== -1) {
           bs.strokes.splice(idx, 1);
+          saveBoardSoon();
         } else {
           // Could still be the user's active (unfinished) stroke
           const active = bs.active.get(userId);
@@ -2263,6 +2342,7 @@ function registerSocketHandlers() {
         if (bs.strokes.length > MAX_BOARD_STROKES) {
           bs.strokes = bs.strokes.slice(-MAX_BOARD_STROKES);
         }
+        saveBoardSoon();
         socket.to(socket.roomId).emit("board stroke add", { userId, stroke });
       }),
     );
@@ -2327,6 +2407,7 @@ function registerSocketHandlers() {
           bs.strokes = [];
           bs.active.clear();
         }
+        saveBoardSoon(); // persist the cleared board so a restart can't restore it
         io().to(socket.roomId).emit("board clear");
         const room = state.rooms.get(socket.roomId);
         logStaff(socket, "clear board", null, room);
@@ -5578,6 +5659,8 @@ function purgeAllGhostUsers() {
 module.exports = {
   loadRooms,
   saveRooms,
+  loadBoard,
+  saveBoardSync,
   debouncedSaveRooms,
   registerSocketHandlers,
   startCleanupIntervals,

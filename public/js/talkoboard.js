@@ -664,6 +664,12 @@ class Talkoboard {
     this.chatInput.maxLength = 200;
     this.chatInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.submitChat();
+      else if (e.key === "Escape") {
+        // Esc steps out of the chat (closes the panel, drops focus) so you are
+        // back on the board.
+        this.closeChat();
+        e.preventDefault();
+      }
       e.stopPropagation();
     });
     this.chatSendBtn = document.createElement("button");

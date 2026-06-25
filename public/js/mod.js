@@ -1415,6 +1415,13 @@
             (a.reason ? "  ·  " + a.reason : ""),
         ),
       );
+      // Identity line, consistent with the audit feed and reports board: the
+      // device id shows for all staff; the IP is only present for devs (the
+      // server omits it for mods).
+      const idBits = [];
+      if (a.deviceId) idBits.push("id: " + a.deviceId);
+      if (a.ip) idBits.push("IP: " + a.ip);
+      if (idBits.length) main.appendChild(span("rc-sub mono", idBits.join("  ·  ")));
       row.appendChild(main);
 
       if (a.status === "pending") {
