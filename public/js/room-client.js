@@ -2,6 +2,8 @@
 // Talkomatic chat room client: real-time diff-based chat, emote system,
 // word filter integration, vote-kick UI, link safety, dev mode UI, layout.
 
+window.socket = socket;
+
 // ── 1. CONSTANTS & STATE ────────────────────────────────────────────────────
 
 // Staff mode: pass dev/mod keys from localStorage in socket auth
@@ -740,7 +742,11 @@ function warnRefLink() {
   notify(
     "Invite links only count for people new to Talkomatic. Everyone here is already on it, so the referral code was removed.",
     "warning",
-    { title: "Invite links don't work in rooms", fullWidth: true, timeout: 9000 },
+    {
+      title: "Invite links don't work in rooms",
+      fullWidth: true,
+      timeout: 9000,
+    },
   );
 }
 // Re-render the chat box from selfRawText, e.g. after stripping a ref code.
@@ -1638,7 +1644,8 @@ function applyDevAppearanceToRow(row, user) {
   const showModFlair = !!user.isMod && !user.isDev && !user.isHidden;
   const wantLevel = user.modLevel || 2;
   if (showModFlair) {
-    if (!modBadge) info.insertBefore(createModBadge(wantLevel), info.firstChild);
+    if (!modBadge)
+      info.insertBefore(createModBadge(wantLevel), info.firstChild);
     else if (Number(modBadge.dataset.level) !== wantLevel)
       modBadge.replaceWith(createModBadge(wantLevel));
   } else if (modBadge) {
@@ -2294,7 +2301,8 @@ function refreshLayoutToggle() {
   const horizontal =
     (userLayoutPreference || currentRoomLayout) === "horizontal";
   const icon = btn.querySelector("i");
-  if (icon) icon.className = horizontal ? "fas fa-bars" : "fas fa-table-columns";
+  if (icon)
+    icon.className = horizontal ? "fas fa-bars" : "fas fa-table-columns";
   btn.title = horizontal
     ? "Layout: Horizontal (click to switch to vertical)"
     : "Layout: Vertical (click to switch to horizontal)";
@@ -2953,7 +2961,9 @@ async function openReportPrompt(user) {
     { value: "other", label: "Other" },
   ];
   if (!window.StaffUI) {
-    const reason = window.prompt("Report " + name + " to staff. What is wrong?");
+    const reason = window.prompt(
+      "Report " + name + " to staff. What is wrong?",
+    );
     if (reason != null)
       socket.emit("user report", {
         targetUserId: user.id,
