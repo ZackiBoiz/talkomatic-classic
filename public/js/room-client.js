@@ -2,8 +2,6 @@
 // Talkomatic chat room client: real-time diff-based chat, emote system,
 // word filter integration, vote-kick UI, link safety, dev mode UI, layout.
 
-window.socket = socket;
-
 // ── 1. CONSTANTS & STATE ────────────────────────────────────────────────────
 
 // Staff mode: pass dev/mod keys from localStorage in socket auth
@@ -16,6 +14,8 @@ const socket = io({
       undefined,
   },
 });
+
+window.socket = socket;
 // On a server restart, show an "updating" notice and reconnect in place (the
 // reconnect handler below rejoins the room) instead of bouncing to the lobby.
 if (window.TalkomaticConnection)
