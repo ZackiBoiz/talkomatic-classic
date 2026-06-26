@@ -97,18 +97,19 @@ let wordFilterEnabled = true;
 // containing filtered substrings still render instead of becoming asterisks.
 // Unknown ":notanemote:" tokens are plain text and stay filterable.
 function filterTextPreservingEmotes(text) {
-  if (!text.includes(":")) {
+  if (!text.includes(":") && !text.includes(";")) {
     return clientWordFilter.filterText(text);
   }
 
-  const regex = /:([\w]+):/g;
+  const regex = /(:([\w]+):|;([\w]+);)/g;
   let result = "";
   let lastIndex = 0;
   let foundEmote = false;
   let match;
 
   while ((match = regex.exec(text)) !== null) {
-    if (!emoteList[match[1]]) continue;
+    const code = match[2] || match[3];
+    if (!code || !emoteList[code]) continue;
     foundEmote = true;
     result += clientWordFilter.filterText(text.slice(lastIndex, match.index));
     result += match[0];
@@ -312,7 +313,9 @@ function getPlainText(element) {
       t += node.textContent;
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       if (node.nodeName === "IMG" && node.dataset.emoteCode) {
-        t += `:${node.dataset.emoteCode}:`;
+        t += node.dataset.emoteOverlay === "true"
+          ? `;${node.dataset.emoteCode};`
+          : `:${node.dataset.emoteCode}:`;
       } else if (node.nodeName === "BR") {
         t += "\n";
       } else if (node.nodeName === "DIV") {
@@ -463,6 +466,7 @@ let selectedEmoteIndex = -1;
 let filteredEmotes = [];
 let currentEmotePrefix = "";
 let currentEmoteInfo = null;
+let useOverlayEmotes = false;
 
 async function loadEmotes() {
   try {
@@ -606,33 +610,106 @@ function removeTrailingCommas(input) {
   return out;
 }
 
-// Converts :code: tokens in an element to emote <img> elements, preserving
-// the caret if the element is focused
+function createEmoteNode(emoteCode, isOverlay = false) {
+  const img = document.createElement("img");
+  img.src = emoteList[emoteCode];
+  img.alt = isOverlay ? `;${emoteCode};` : `:${emoteCode}:`;
+  img.title = img.alt;
+  img.className = isOverlay ? "emote emote-overlay" : "emote";
+  img.dataset.emoteCode = emoteCode;
+  if (isOverlay) img.dataset.emoteOverlay = "true";
+  else delete img.dataset.emoteOverlay;
+  img.decoding = "async";
+  return img;
+}
+
 function replaceEmotes(element) {
   if (!element) return;
   const text = getPlainText(element);
-  if (!text.includes(":")) return;
-  const regex = /:([\w]+):/g;
-  if (!regex.test(text)) return;
-  regex.lastIndex = 0;
+  if (!text.includes(":") && !text.includes(";")) return;
+
+  const tokenRegex = /(:([\w]+):|;([\w]+);)/g;
+  const matches = [...text.matchAll(tokenRegex)];
+  if (matches.length === 0) return;
+
   const isActive = document.activeElement === element;
-  let cursorPos = 0;
-  if (isActive) cursorPos = getCursorPosition(element);
-  let html = "",
-    lastIdx = 0,
-    match,
-    changed = false;
-  while ((match = regex.exec(text)) !== null) {
-    if (emoteList[match[1]]) {
-      changed = true;
-      html += text.substring(lastIdx, match.index);
-      html += `<img src="${emoteList[match[1]]}" alt=":${match[1]}:" title=":${match[1]}:" class="emote" data-emote-code="${match[1]}">`;
-      lastIdx = match.index + match[0].length;
+  const cursorPos = isActive ? getCursorPosition(element) : 0;
+  const frag = document.createDocumentFragment();
+  let lastIndex = 0;
+  let changed = false;
+
+  const appendText = (value) => {
+    if (value) frag.appendChild(document.createTextNode(value));
+  };
+
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i];
+    const tokenStart = match.index ?? 0;
+    const tokenEnd = tokenStart + match[0].length;
+
+    appendText(text.slice(lastIndex, tokenStart));
+
+    const normalCode = match[2];
+    const overlayCode = match[3];
+    const code = normalCode || overlayCode;
+
+    if (!code || !emoteList[code]) {
+      appendText(match[0]);
+      lastIndex = tokenEnd;
+      continue;
     }
+
+    if (normalCode) {
+      const stack = [{ code, isOverlay: false }];
+      let consumedEnd = tokenEnd;
+      let j = i + 1;
+
+      while (j < matches.length) {
+        const next = matches[j];
+        const nextStart = next.index ?? consumedEnd;
+        const between = text.slice(consumedEnd, nextStart);
+
+        if (!/^\s*$/.test(between)) break;
+        if (!next[3] || !emoteList[next[3]]) break;
+
+        stack.push({ code: next[3], isOverlay: true });
+        consumedEnd = nextStart + next[0].length;
+        j++;
+      }
+
+      if (stack.length > 1) {
+        const stackWrap = document.createElement("span");
+        stackWrap.className = "emote-stack";
+        stack.forEach((token, idx) => {
+          const img = createEmoteNode(token.code, token.isOverlay);
+          img.style.zIndex = String(idx + 1);
+          stackWrap.appendChild(img);
+        });
+        frag.appendChild(stackWrap);
+        changed = true;
+        lastIndex = consumedEnd;
+        i = j - 1;
+        continue;
+      }
+
+      frag.appendChild(createEmoteNode(code, false));
+      changed = true;
+      lastIndex = tokenEnd;
+      continue;
+    }
+
+    // stray overlay emotes render as normal emotes unless they are attached to a normal emote on their left.
+    frag.appendChild(createEmoteNode(code, false));
+    changed = true;
+    lastIndex = tokenEnd;
   }
+
+  appendText(text.slice(lastIndex));
+
   if (!changed) return;
-  html += text.substring(lastIdx);
-  element.innerHTML = html;
+
+  element.innerHTML = "";
+  element.appendChild(frag);
   if (isActive) {
     try {
       setCursorPosition(element, cursorPos);
@@ -668,10 +745,20 @@ function findEmoteAtCursor() {
 
   const text = node.textContent;
   let start = offset - 1;
-  while (start >= 0 && text[start] !== ":") start--;
-  if (start >= 0 && text[start] === ":") {
+  while (start >= 0 && text[start] !== ":" && text[start] !== ";") start--;
+  if (start >= 0 && (text[start] === ":" || text[start] === ";")) {
+    const delimiter = text[start];
     const prefix = text.substring(start + 1, offset);
-    if (prefix) return { node, prefix, startPos: start, endPos: offset };
+    if (prefix) {
+      return {
+        node,
+        prefix,
+        delimiter,
+        isOverlayQuery: delimiter === ";",
+        startPos: start,
+        endPos: offset,
+      };
+    }
   }
   return null;
 }
@@ -927,6 +1014,91 @@ function ensureCaretInTextNode() {
   }
 }
 
+function getLastDescendant(node) {
+  let cur = node;
+  while (cur && cur.lastChild) cur = cur.lastChild;
+  return cur;
+}
+
+function getFirstDescendant(node) {
+  let cur = node;
+  while (cur && cur.firstChild) cur = cur.firstChild;
+  return cur;
+}
+
+function previousDomNode(node) {
+  if (!node || !node.parentNode) return null;
+  if (node.previousSibling) return getLastDescendant(node.previousSibling);
+  return previousDomNode(node.parentNode);
+}
+
+function nextDomNode(node) {
+  if (!node || !node.parentNode) return null;
+  if (node.nextSibling) return getFirstDescendant(node.nextSibling);
+  return nextDomNode(node.parentNode);
+}
+
+function getEmoteDeletionTarget(node) {
+  if (!node) return null;
+  if (node.nodeType === Node.ELEMENT_NODE && node.classList?.contains("emote-stack")) {
+    return node;
+  }
+  if (node.nodeName === "IMG" && node.dataset.emoteCode) {
+    return node.closest?.(".emote-stack") || node;
+  }
+  return null;
+}
+
+function deleteEmoteNodeAtCaret(direction) {
+  if (!chatInput) return false;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return false;
+
+  const range = sel.getRangeAt(0);
+  if (!range.collapsed) return false;
+
+  let candidate = null;
+  const container = range.startContainer;
+  const offset = range.startOffset;
+
+  if (container.nodeType === Node.TEXT_NODE) {
+    if (direction === "backward") {
+      if (offset !== 0) return false;
+      candidate = previousDomNode(container);
+    } else {
+      if (offset !== (container.textContent || "").length) return false;
+      candidate = nextDomNode(container);
+    }
+  } else if (container.nodeType === Node.ELEMENT_NODE) {
+    if (direction === "backward") {
+      if (offset > 0) candidate = getLastDescendant(container.childNodes[offset - 1]);
+      else candidate = previousDomNode(container);
+    } else {
+      if (offset < container.childNodes.length) candidate = getFirstDescendant(container.childNodes[offset]);
+      else candidate = nextDomNode(container);
+    }
+  }
+
+  candidate = getEmoteDeletionTarget(candidate);
+  if (!candidate || !candidate.parentNode) return false;
+
+  const parent = candidate.parentNode;
+  const replacement = document.createTextNode("");
+  parent.insertBefore(replacement, candidate);
+  candidate.remove();
+
+  try {
+    const newRange = document.createRange();
+    newRange.setStart(replacement, 0);
+    newRange.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+    ensureCaretInTextNode();
+  } catch { }
+
+  return true;
+}
+
 function isValidEmoteInfo(info) {
   return !!(
     info &&
@@ -937,15 +1109,17 @@ function isValidEmoteInfo(info) {
   );
 }
 
-function insertEmote(emoteCode, emoteInfo) {
+function insertEmote(emoteCode, emoteInfo, options = {}) {
   if (!chatInput) return;
   chatInput.focus();
-  const html = `<img src="${emoteList[emoteCode]}" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`;
-  try {
-    const targetInfo = isValidEmoteInfo(emoteInfo)
-      ? emoteInfo
-      : findEmoteAtCursor();
 
+  const targetInfo = isValidEmoteInfo(emoteInfo)
+    ? emoteInfo
+    : findEmoteAtCursor();
+  const useOverlayToken = options.overlay ?? (targetInfo?.isOverlayQuery ?? false);
+  const tokenText = useOverlayToken ? `;${emoteCode};` : `:${emoteCode}:`;
+
+  try {
     if (targetInfo && targetInfo.node && targetInfo.node.parentNode) {
       const sel = window.getSelection();
       const r = document.createRange();
@@ -954,10 +1128,24 @@ function insertEmote(emoteCode, emoteInfo) {
       sel.removeAllRanges();
       sel.addRange(r);
     }
-    document.execCommand("insertHTML", false, html);
+
+    if (useOverlayToken) {
+      document.execCommand("insertText", false, tokenText);
+      replaceEmotes(chatInput);
+    } else {
+      const html = `<img src="${emoteList[emoteCode]}" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`;
+      document.execCommand("insertHTML", false, html);
+    }
   } catch {
     try {
-      document.execCommand("insertHTML", false, html);
+      document.execCommand(
+        useOverlayToken ? "insertText" : "insertHTML",
+        false,
+        useOverlayToken
+          ? tokenText
+          : `<img src="${emoteList[emoteCode]}" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`,
+      );
+      if (useOverlayToken) replaceEmotes(chatInput);
     } catch { }
   }
 
@@ -1115,7 +1303,7 @@ function isEmoteImageVisible(img, container) {
 
   return (
     itemRect.bottom > containerRect.top &&
-    itemRect.top < containerRect.bottom * 2 && // be lenient and lazy-load emotes that are just out of reach (seamless)
+    itemRect.top < containerRect.bottom + containerRect.height && // be lenient and lazy-load emotes that are just out of reach (seamless)
     itemRect.right > containerRect.left &&
     itemRect.left < containerRect.right
   );
@@ -1153,6 +1341,30 @@ function createEmotesDropdown() {
   dropdown.style.position = "absolute";
   dropdown.style.zIndex = "10000";
 
+  const header = document.createElement("div");
+  header.className = "emotes-dropdown-header";
+
+  const toggleLabel = document.createElement("label");
+  toggleLabel.className = "emotes-dropdown-toggle";
+
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  toggle.checked = useOverlayEmotes;
+  toggle.addEventListener("change", () => {
+    useOverlayEmotes = toggle.checked;
+  });
+
+  const toggleText = document.createElement("span");
+  toggleText.textContent = "Use overlay emotes";
+
+  toggleLabel.appendChild(toggle);
+  toggleLabel.appendChild(toggleText);
+  header.appendChild(toggleLabel);
+  dropdown.appendChild(header);
+
+  const list = document.createElement("div");
+  list.className = "emotes-dropdown-list";
+
   Object.entries(emoteList).forEach(([code, url]) => {
     const item = document.createElement("div");
     item.className = "emote-item";
@@ -1172,16 +1384,18 @@ function createEmotesDropdown() {
       setTimeout(() => {
         if (chatInput) {
           chatInput.focus();
-          insertEmote(code, null);
+          insertEmote(code, null, { overlay: useOverlayEmotes });
         }
       }, 0);
     });
-    dropdown.appendChild(item);
+    list.appendChild(item);
   });
 
-  const loadVisibleImages = () => hydrateVisibleEmoteImages(dropdown);
-  dropdown.addEventListener("scroll", loadVisibleImages, { passive: true });
+  const loadVisibleImages = () => hydrateVisibleEmoteImages(list);
+  list.addEventListener("scroll", loadVisibleImages, { passive: true });
   window.addEventListener("resize", loadVisibleImages, { passive: true });
+
+  dropdown.appendChild(list);
 
   button.addEventListener("click", (e) => {
     e.preventDefault();
@@ -1592,7 +1806,7 @@ function displayChatMessage(data) {
     const display = applyWordFilter(selfRawText);
     chatDiv.innerHTML = "";
     chatDiv.textContent = display;
-    if (display.includes(":")) replaceEmotes(chatDiv);
+    if (/[;:]/.test(display)) replaceEmotes(chatDiv);
     selfIsFiltered = wordFilterEnabled && clientWordFilter?.ready;
     if (isActive) {
       try {
@@ -2301,11 +2515,22 @@ function createUserRow(user, container) {
         showAutocomplete(emoteInfo.prefix);
       } else hideAutocomplete();
       const text = getPlainText(div);
-      if (text.includes(":") && /:([\w]+):/.test(text)) replaceEmotes(div);
+      if (/[;:]/.test(text)) replaceEmotes(div);
       updateSentMessage();
     });
     div.addEventListener("keydown", (e) => {
       if (handleEmoteNavigation(e)) return;
+
+      if (e.key === "Backspace" || e.key === "Delete") {
+        const deleteDirection = e.key === "Backspace" ? "backward" : "forward";
+        if (deleteEmoteNodeAtCaret(deleteDirection)) {
+          e.preventDefault();
+          if (getPlainText(div).trim() === "") div.innerHTML = "";
+          if (/[;:]/.test(getPlainText(div))) replaceEmotes(div);
+          updateSentMessage();
+          return;
+        }
+      }
 
       // Ctrl/Cmd + Backspace or Delete with a selection (e.g. after Ctrl+A)
       // can leave text behind in contenteditable, so clear the selection
@@ -2411,6 +2636,9 @@ function injectStyles() {
   style.setAttribute("data-emote-styles", "true");
   style.textContent = `
     .emote { display:inline-block; vertical-align:middle; width:auto; height:20px; margin:0 2px; }
+    .emote-stack { display:inline-grid; grid-template-areas:"stack"; align-items:center; justify-items:center; vertical-align:middle; margin:0 2px; line-height:0; }
+    .emote-stack > .emote { grid-area:stack; margin:0; }
+    .emote-overlay { margin:0; }
     .chat-input { background-color:black; color:orange; outline:none; white-space:pre-wrap; word-break:break-word; }
     .emote-autocomplete { position:absolute; z-index:10000; background:#333; border:1px solid #555; border-radius:4px; max-height:300px; overflow-y:auto; width:200px; box-shadow:0 3px 10px rgba(0,0,0,0.3); }
     .emote-autocomplete-header { padding:5px 10px; font-weight:bold; border-bottom:1px solid #555; color:#eee; }
@@ -2422,7 +2650,11 @@ function injectStyles() {
     .vote-button { cursor:pointer; transition:background-color 0.2s ease; }
     .vote-button.voted { background-color:#5c3d3d !important; color:#ff9090 !important; }
     .emotes-button { padding:5px 10px; background:#444; color:white; border:none; border-radius:4px; cursor:pointer; }
-    .emotes-dropdown { background:#333; border:1px solid #555; border-radius:4px; padding:10px; max-width:300px; max-height:300px; overflow-y:auto; flex-wrap:wrap; gap:5px; }
+    .emotes-dropdown { background:#333; border:1px solid #555; border-radius:4px; padding:8px; max-width:320px; max-height:340px; overflow:hidden; display:flex; flex-direction:column; gap:8px; }
+    .emotes-dropdown-header { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:2px 4px 6px; border-bottom:1px solid #555; color:#eee; }
+    .emotes-dropdown-toggle { display:inline-flex; align-items:center; gap:8px; font-size:12px; color:#fff; cursor:pointer; user-select:none; }
+    .emotes-dropdown-toggle input { accent-color:#ff9800; }
+    .emotes-dropdown-list { display:flex; flex-wrap:wrap; gap:5px; overflow-y:auto; max-height:260px; padding-top:2px; }
     .emote-item { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:5px; cursor:pointer; border-radius:4px; background:#444; width:60px; height:60px; transition:background-color 0.2s ease; }
     .emote-item:hover { background-color:#555; }
     .emote-item img { width:30px; height:auto; }
