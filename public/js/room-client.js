@@ -93,6 +93,10 @@ const ERROR_CODES = {
 let clientWordFilter = null;
 let wordFilterEnabled = true;
 
+function hasEmote(code) {
+  return Object.prototype.hasOwnProperty.call(emoteList, code);
+}
+
 // Filters text in segments around valid :code: emote tokens so emote codes
 // containing filtered substrings still render instead of becoming asterisks.
 // Unknown ":notanemote:" tokens are plain text and stay filterable.
@@ -107,9 +111,10 @@ function filterTextPreservingEmotes(text) {
   let foundEmote = false;
   let match;
 
+
   while ((match = regex.exec(text)) !== null) {
     const code = match[2] || match[3];
-    if (!code || !emoteList[code]) continue;
+    if (!code || !hasEmote(code)) continue;
     foundEmote = true;
     result += clientWordFilter.filterText(text.slice(lastIndex, match.index));
     result += match[0];
@@ -473,9 +478,19 @@ async function loadEmotes() {
     const resp = await fetch(`https://raw.githubusercontent.com/ZackiBoiz/Multiplayer-Piano-Optimizations/refs/heads/main/emotes/meta.jsonc?_=${Date.now()}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const pairs = parseJSONC(await resp.text());
-    emoteList = Object.fromEntries(Object.entries(pairs)
-      .map(([name, ext]) => [name, `https://raw.githubusercontent.com/ZackiBoiz/Multiplayer-Piano-Optimizations/refs/heads/main/emotes/assets/${name}.${ext}`]
-      ));
+    const validCode = /^[A-Za-z0-9_-.]+$/;
+    const validExt = /^(?:png|gif|webp|jpe?g|avif|heif|tiff|bmp|svg)$/i;
+    emoteList = Object.fromEntries(
+      Object.entries(pairs)
+        .filter(([name, ext]) =>
+          validCode.test(name) &&
+          typeof ext === "string" &&
+          validExt.test(ext)
+        )
+        .map(([name, ext]) => [name,
+          `https://raw.githubusercontent.com/ZackiBoiz/Multiplayer-Piano-Optimizations/refs/heads/main/emotes/assets/${name}.${ext}`,
+        ]),
+    );
     console.log("Emotes loaded:", Object.keys(emoteList).length);
   } catch (err) {
     console.error("Error loading emotes:", err);
@@ -653,7 +668,7 @@ function replaceEmotes(element) {
     const overlayCode = match[3];
     const code = normalCode || overlayCode;
 
-    if (!code || !emoteList[code]) {
+    if (!code || !hasEmote(code)) {
       appendText(match[0]);
       lastIndex = tokenEnd;
       continue;
@@ -670,7 +685,7 @@ function replaceEmotes(element) {
         const between = text.slice(consumedEnd, nextStart);
 
         if (!/^\s*$/.test(between)) break;
-        if (!next[3] || !emoteList[next[3]]) break;
+        if (!next[3] || !hasEmote(next[3])) break;
 
         stack.push({ code: next[3], isOverlay: true });
         consumedEnd = nextStart + next[0].length;
@@ -927,7 +942,6 @@ function showAutocomplete(prefix) {
 
   const loadVisibleImages = () => hydrateVisibleEmoteImages(list);
   list.addEventListener("scroll", loadVisibleImages, { passive: true });
-  window.addEventListener("resize", loadVisibleImages, { passive: true });
 
   emoteAutocomplete.appendChild(list);
   emoteAutocomplete.style.top = `${rect.bottom + window.scrollY + 5}px`;
