@@ -2382,8 +2382,11 @@ function updateTimeLabels() {
     { weekday: "long", year: "numeric", month: "short", day: "numeric" },
   );
   dateTimeElement.querySelector(".time").textContent = now.toLocaleTimeString();
-  document.querySelector(".room-uptime").textContent = msToTime(Date.now() - currentRoomCreatedAt);
-  console.log(currentRoomCreatedAt);
+
+  const uptimeEl = document.querySelector(".room-uptime");
+  if (uptimeEl) {
+    uptimeEl.textContent = currentRoomCreatedAt > 0 ? msToTime(Date.now() - currentRoomCreatedAt) : "";
+  }
 }
 
 function msToTime(duration) {

@@ -1958,6 +1958,7 @@ function emitJoinSuccess(socket, room, userId, username, location) {
   };
 
   // The joining user always sees themselves in full
+  const createdAt = room.createdAt || room.lastActiveTime || 0;
   socket.emit("room joined", {
     protocol: CONFIG.VERSIONS.PROTOCOL,
     roomId: room.id,
@@ -1979,8 +1980,8 @@ function emitJoinSuccess(socket, room, userId, username, location) {
     layout: room.layout,
     votes: filterVotesForSocket(room, socket),
     currentMessages: filterCurrentMessagesForSocket(room, socket),
-    createdAt: room.createdAt,
-    uptime: Date.now() - room.createdAt
+    createdAt: createdAt,
+    uptime: Date.now() - createdAt
   });
 
   socket.leave("lobby");
