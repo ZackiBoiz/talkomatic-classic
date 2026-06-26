@@ -2634,7 +2634,7 @@ function updateRoomInfo(data) {
   // "room joined" sends roomType, "room update" sends type
   const roomType = data.roomType || data.type;
   if (typeEl && roomType) {
-    typeEl.textContent = `${getRoomTypeDisplay(roomType) || "Public"} Room`;
+    typeEl.textContent = `${getRoomTypeDisplay(roomType) || "Public"} room`;
   }
 
   if (!document.getElementById("emotesButton")) createEmotesDropdown();
@@ -2926,7 +2926,7 @@ function msToTime(duration) {
     minutes = parseInt((duration / (1000 * 60)) % 60),
     hours = parseInt((duration / (1000 * 60 * 60))); // no modulo here. max res is hrs
 
-  return (hours > 0 ? hours + ":" : "") + minutes.padStart(2, "0") + ":" + seconds.padStart(2, "0");
+  return (hours > 0 ? hours + ":" : "") + String(minutes).padStart(2, "0") + ":" + String(seconds).padStart(2, "0");
 }
 
 // ── 16. SOCKET EVENT HANDLERS ───────────────────────────────────────────────
