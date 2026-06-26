@@ -1058,16 +1058,19 @@ function filterCurrentMessagesForSocket(room, recipientSocket) {
 function formatRoomForSocket(room, recipientSocket) {
   const users = filterUsersForSocket(room.users || [], recipientSocket);
   const joinableCount = getJoinableUserCount(room);
+
+  const createdAt = room.createdAt || room.lastActiveTime || 0;
   return {
     id: room.id,
     name: room.name,
     type: room.type,
     layout: room.layout,
+    createdAt: createdAt,
+    uptime: Date.now() - createdAt,
     isFull: joinableCount >= roomCapacity(room),
     userCount: joinableCount,
     visibleUserCount: users.length,
     lastChatActivity: state.roomLastChatActivity.get(room.id) || 0,
-    createdAt: room.createdAt || room.lastActiveTime || 0,
     spotlight: !!room.spotlight,
     locked: !!room.locked,
     capacity: roomCapacity(room),
@@ -1079,11 +1082,15 @@ function formatRoomForSocket(room, recipientSocket) {
 function formatRoomStateForSocket(room, recipientSocket) {
   const users = filterUsersForSocket(room.users || [], recipientSocket);
   const joinableCount = getJoinableUserCount(room);
+
+  const createdAt = room.createdAt || room.lastActiveTime || 0;
   return {
     id: room.id,
     name: room.name,
     type: room.type,
     layout: room.layout,
+    createdAt: createdAt,
+    uptime: Date.now() - createdAt,
     users,
     votes: filterVotesForSocket(room, recipientSocket),
     currentMessages: filterCurrentMessagesForSocket(room, recipientSocket),
@@ -1831,6 +1838,8 @@ function emitJoinSuccess(socket, room, userId, username, location) {
     layout: room.layout,
     votes: filterVotesForSocket(room, socket),
     currentMessages: filterCurrentMessagesForSocket(room, socket),
+    createdAt: room.createdAt,
+    uptime: Date.now() - room.createdAt
   });
 
   socket.leave("lobby");

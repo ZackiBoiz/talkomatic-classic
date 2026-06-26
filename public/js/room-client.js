@@ -32,6 +32,7 @@ let currentRoomLayout = "horizontal";
 // "follow the room's layout".
 let userLayoutPreference = null;
 let currentRoomName = "";
+let currentRoomCreatedAt = 0;
 let lastSentMessage = "";
 let chatInput = null;
 // Socket protocol this client speaks. Must match CONFIG.VERSIONS.PROTOCOL on
@@ -216,7 +217,7 @@ function showInfoModal(message, callback = null) {
   showModal("Information", message, {
     showCancel: false,
     confirmText: "OK",
-    callback: callback || (() => {}),
+    callback: callback || (() => { }),
   });
 }
 
@@ -282,10 +283,10 @@ const muteIcon = document.getElementById("muteIcon");
 let soundEnabled = true;
 
 function playJoinSound() {
-  if (soundEnabled) joinSound.play().catch(() => {});
+  if (soundEnabled) joinSound.play().catch(() => { });
 }
 function playLeaveSound() {
-  if (soundEnabled) leaveSound.play().catch(() => {});
+  if (soundEnabled) leaveSound.play().catch(() => { });
 }
 function toggleMute() {
   soundEnabled = !soundEnabled;
@@ -340,7 +341,7 @@ function placeCursorAtEnd(el) {
     const s = window.getSelection();
     s.removeAllRanges();
     s.addRange(r);
-  } catch {}
+  } catch { }
 }
 
 // Returns the caret position as a plain-text offset (emotes count as the
@@ -707,7 +708,7 @@ function insertEmote(emoteCode, emoteInfo) {
   } catch {
     try {
       document.execCommand("insertHTML", false, html);
-    } catch {}
+    } catch { }
   }
 
   ensureCaretInTextNode();
@@ -1197,8 +1198,8 @@ function adjustVoteButtonVisibility() {
       row.classList.contains("dev-user") || !!row.querySelector(".mod-badge");
     btn.style.display =
       userCount >= MIN_USERS_FOR_VOTING &&
-      row.dataset.userId !== currentUserId &&
-      !isVisibleStaff
+        row.dataset.userId !== currentUserId &&
+        !isVisibleStaff
         ? "inline-block"
         : "none";
   });
@@ -1331,11 +1332,11 @@ function displayChatMessage(data) {
 // handles like youtube.com/@mohdmahmodi are part of the link, not just the host.
 const URL_PATTERN = new RegExp(
   "(?:https?:\\/\\/[^\\s<>\"']+)" +
-    "|(?:www\\.[^\\s<>\"']+)" +
-    "|(?:\\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?" +
-    "(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*" +
-    "\\.(?:com|net|org|io|gg|co|me|app|dev|xyz|info|link|site|online|club|live|stream|fun|top|cc|tv|to|gl|ly|us|uk|ca|eu|de|fr|es|it|nl|jp|kr|in|br|au|ru|cn|edu|gov|biz|pro|tech|store|shop|blog|news|wiki|games|chat|space|world|media|tube|ai|so|sh|fm|im|re)" +
-    "(?:[\\/?#][^\\s<>\"']*)?)",
+  "|(?:www\\.[^\\s<>\"']+)" +
+  "|(?:\\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?" +
+  "(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*" +
+  "\\.(?:com|net|org|io|gg|co|me|app|dev|xyz|info|link|site|online|club|live|stream|fun|top|cc|tv|to|gl|ly|us|uk|ca|eu|de|fr|es|it|nl|jp|kr|in|br|au|ru|cn|edu|gov|biz|pro|tech|store|shop|blog|news|wiki|games|chat|space|world|media|tube|ai|so|sh|fm|im|re)" +
+  "(?:[\\/?#][^\\s<>\"']*)?)",
   "gi",
 );
 
@@ -1796,7 +1797,7 @@ socket.on("dev hide status", (data) => {
       "talkomatic_devHidden",
       currentUserIsHidden ? "1" : "0",
     );
-  } catch (_) {}
+  } catch (_) { }
   const button = document.getElementById("devHideToggle");
   updateDevHideButton(button);
   setStaffItemLabel(
@@ -2096,11 +2097,13 @@ function getRoomTypeDisplay(type) {
 
 function updateRoomInfo(data) {
   const nameEl = document.querySelector(".room-name");
+  const uptimeEl = document.querySelector(".room-uptime");
   const idEl = document.querySelector(".room-id");
   const typeEl = document.querySelector(".room-type");
 
   if (nameEl)
     nameEl.textContent = `Room: ${currentRoomName || data.roomName || data.roomId}`;
+  if (uptimeEl) uptimeEl.textContent = msToTime(Date.now() - data.createdAt);
   if (idEl) idEl.textContent = `Room ID: ${data.roomId || currentRoomId}`;
 
   // "room joined" sends roomType, "room update" sends type
@@ -2372,13 +2375,27 @@ function copyInviteLink() {
 }
 
 const dateTimeElement = document.querySelector("#dateTime");
-function updateDateTime() {
+function updateTimeLabels() {
   const now = new Date();
   dateTimeElement.querySelector(".date").textContent = now.toLocaleDateString(
     "en-US",
     { weekday: "long", year: "numeric", month: "short", day: "numeric" },
   );
   dateTimeElement.querySelector(".time").textContent = now.toLocaleTimeString();
+  document.querySelector(".room-uptime").textContent = msToTime(Date.now() - currentRoomCreatedAt);
+  console.log(currentRoomCreatedAt);
+}
+
+function msToTime(duration) {
+  let seconds = parseInt((duration / 1000) % 60),
+    minutes = parseInt((duration / (1000 * 60)) % 60),
+    hours = parseInt((duration / (1000 * 60 * 60))); // no modulo here. max res is hrs
+
+  hours = (hours < 10) ? "0" + hours : hours;
+  minutes = (minutes < 10) ? "0" + minutes : minutes;
+  seconds = (seconds < 10) ? "0" + seconds : seconds;
+
+  return hours + ":" + minutes + ":" + seconds;
 }
 
 // ── 16. SOCKET EVENT HANDLERS ───────────────────────────────────────────────
@@ -2390,7 +2407,7 @@ socket.on("update votes", updateVotesUI);
 socket.on("kicked", (data) => {
   showInfoModal(
     (data && data.message) ||
-      "You have been removed from the room by a majority vote.",
+    "You have been removed from the room by a majority vote.",
     () => {
       window.location.href = "/index.html";
     },
@@ -2428,6 +2445,7 @@ socket.on("room joined", (data) => {
   currentRoomLayout = data.layout || currentRoomLayout;
   currentRoomName = data.roomName;
   currentRoomMaxSize = data.maxSize || 0;
+  currentRoomCreatedAt = data.createdAt || 0;
 
   currentUserIsDev = !!data.isDev;
   currentUserIsMod = !!data.isMod;
@@ -2662,7 +2680,7 @@ socket.on("error", (error) => {
   console.log(error);
   showErrorModal(
     (error.error.replaceDefaultText ? "" : "An error occurred: ") +
-      error.error.message,
+    error.error.message,
   );
 });
 
@@ -2815,7 +2833,7 @@ async function initRoom() {
 window.addEventListener("load", () => {
   injectStyles();
   initRoom();
-  updateDateTime();
+  updateTimeLabels();
   adjustLayout();
   updateInviteLink();
   initializeAppDirectory();
@@ -2900,7 +2918,7 @@ function showTabSupersededOverlay() {
   try {
     socket.io.opts.reconnection = false;
     socket.disconnect();
-  } catch (_) {}
+  } catch (_) { }
   if (!document.getElementById("supersededStyles")) {
     const st = document.createElement("style");
     st.id = "supersededStyles";
@@ -2944,7 +2962,7 @@ function debouncedViewportChange() {
   }, 100);
 }
 
-setInterval(updateDateTime, 1000);
+setInterval(updateTimeLabels, 1000);
 window.addEventListener("resize", debouncedViewportChange);
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -3197,41 +3215,41 @@ function openUserStaffMenu(user) {
       items.push(
         lvl < 2
           ? {
-              icon: '<i class="fas fa-arrow-up"></i>',
-              label: "Promote to full mod (L2)",
-              desc: "Grant full mod powers",
-              onClick: async () => {
-                if (
-                  await StaffUI.confirm({
-                    title: "Promote to L2",
-                    message: `Promote ${name} to a full (level 2) moderator?`,
-                    confirmText: "Promote",
-                  })
-                )
-                  socket.emit("dev set mod level for user", {
-                    targetUserId: user.id,
-                    level: 2,
-                  });
-              },
-            }
-          : {
-              icon: '<i class="fas fa-arrow-down"></i>',
-              label: "Demote to junior (L1)",
-              desc: "Limit them to junior powers",
-              onClick: async () => {
-                if (
-                  await StaffUI.confirm({
-                    title: "Demote to L1",
-                    message: `Demote ${name} to a junior (level 1) moderator?`,
-                    confirmText: "Demote",
-                  })
-                )
-                  socket.emit("dev set mod level for user", {
-                    targetUserId: user.id,
-                    level: 1,
-                  });
-              },
+            icon: '<i class="fas fa-arrow-up"></i>',
+            label: "Promote to full mod (L2)",
+            desc: "Grant full mod powers",
+            onClick: async () => {
+              if (
+                await StaffUI.confirm({
+                  title: "Promote to L2",
+                  message: `Promote ${name} to a full (level 2) moderator?`,
+                  confirmText: "Promote",
+                })
+              )
+                socket.emit("dev set mod level for user", {
+                  targetUserId: user.id,
+                  level: 2,
+                });
             },
+          }
+          : {
+            icon: '<i class="fas fa-arrow-down"></i>',
+            label: "Demote to junior (L1)",
+            desc: "Limit them to junior powers",
+            onClick: async () => {
+              if (
+                await StaffUI.confirm({
+                  title: "Demote to L1",
+                  message: `Demote ${name} to a junior (level 1) moderator?`,
+                  confirmText: "Demote",
+                })
+              )
+                socket.emit("dev set mod level for user", {
+                  targetUserId: user.id,
+                  level: 1,
+                });
+            },
+          },
       );
       items.push({
         icon: '<i class="fas fa-user-xmark"></i>',
@@ -3890,12 +3908,12 @@ socket.on("megaphone", (data) => {
 socket.on("party mode", () => {
   try {
     triggerDevConfetti();
-  } catch (_) {}
+  } catch (_) { }
   try {
     if (!partyHornAudio) partyHornAudio = new Audio("audio/party-horn.mp3");
     partyHornAudio.currentTime = 0;
-    partyHornAudio.play().catch(() => {});
-  } catch (_) {}
+    partyHornAudio.play().catch(() => { });
+  } catch (_) { }
 });
 socket.on("maintenance status", (data) => {
   if (data && data.enabled)
@@ -4023,7 +4041,7 @@ socket.on("staff notice", (d) => {
     const url = new URL(window.location.href);
     url.searchParams.delete("ref");
     window.history.replaceState({}, document.title, url);
-  } catch (e) {}
+  } catch (e) { }
 })();
 
 // Open the key-entry modal when the page is opened with #staff in the URL
