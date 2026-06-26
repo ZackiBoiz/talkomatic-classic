@@ -2197,6 +2197,11 @@ const APP_STATUS_META = {
     fa: "fa-circle-xmark",
     title: "Application not approved",
   },
+  revoked: {
+    color: "#ff5468",
+    fa: "fa-user-slash",
+    title: "Moderator access revoked",
+  },
 };
 
 // Restyle the lobby link: a colored status dot + "Check status" once an
@@ -2231,7 +2236,9 @@ function showAppStatus() {
       ? "Good news - your application was approved. Your moderator access is delivered to this browser automatically; reload if you do not see it yet."
       : st.status === "rejected"
         ? "Your application was reviewed and not approved this time."
-        : "Your application is in the queue. A developer or full moderator will review it soon. Thanks for your patience.";
+        : st.status === "revoked"
+          ? "Your moderator access has been revoked. If you would like to help out again, you can apply again below."
+          : "Your application is in the queue. A developer or full moderator will review it soon. Thanks for your patience.";
   body.appendChild(p);
   if (st.submittedAt) {
     const s = document.createElement("p");
@@ -2240,8 +2247,9 @@ function showAppStatus() {
     body.appendChild(s);
   }
   // Reviewer note rendered via textContent (never HTML), squared orange-style
-  // strip matching the rest of the staff UI.
-  if (st.reason) {
+  // strip matching the rest of the staff UI. Never shown for a revoked status
+  // (its note would be the old approval message, which no longer applies).
+  if (st.reason && st.status !== "revoked") {
     const note = document.createElement("div");
     note.style.cssText =
       "margin-top:14px;padding:11px 13px;background:#161616;border:1px solid #333;border-left:3px solid " +
@@ -2262,7 +2270,7 @@ function showAppStatus() {
     body.appendChild(note);
   }
   const actions = [{ label: "Close", kind: "primary", onClick: () => {} }];
-  if (st.status === "rejected")
+  if (st.status === "rejected" || st.status === "revoked")
     actions.unshift({ label: "Apply again", onClick: () => openModApply() });
   StaffUI.modal({
     title: m.title,

@@ -769,13 +769,23 @@ function announceAppeal(id) {
 // The latest mod-application status for a device, for the lobby "Check status"
 // link. The reviewer's note is included so the applicant can read any message
 // the staff member left when they approved or declined.
-function appStatusPayload(deviceId) {
+function appStatusPayload(deviceId, isStaff) {
   const a = applications.latestForDevice(deviceId);
   if (!a) return { has: false };
+  let status = a.status; // pending | approved | rejected
+  // An approved-and-claimed application whose holder is no longer staff means
+  // their mod key was revoked (or lost), so a green "approved" is misleading.
+  // Surface "revoked" instead, which the lobby shows with an apply-again option.
+  // The reviewer's note is the old approval message, so it is dropped here.
+  let reason = a.reason || null;
+  if (status === "approved" && a.claimed && !isStaff) {
+    status = "revoked";
+    reason = null;
+  }
   return {
     has: true,
-    status: a.status, // pending | approved | rejected
-    reason: a.reason || null,
+    status,
+    reason,
     reviewedAt: a.reviewedAt || null,
     submittedAt: a.submittedAt || null,
   };
@@ -2004,7 +2014,7 @@ function registerSocketHandlers() {
     // the lobby menu can offer "Check status" with the reviewer's note instead
     // of "Become a moderator". Staff never see this (their link is hidden).
     if (socket.deviceId && !socket.isDev && !socket.isMod) {
-      const st = appStatusPayload(socket.deviceId);
+      const st = appStatusPayload(socket.deviceId, false);
       if (st.has) socket.emit("mod application status", st);
     }
 
@@ -4901,7 +4911,10 @@ function registerSocketHandlers() {
       safe(async () => {
         if (!socket.deviceId)
           return socket.emit("mod application status", { has: false });
-        socket.emit("mod application status", appStatusPayload(socket.deviceId));
+        socket.emit(
+          "mod application status",
+          appStatusPayload(socket.deviceId, socket.isDev || socket.isMod),
+        );
       }),
     );
 
@@ -5132,7 +5145,10 @@ function registerSocketHandlers() {
           // the same idea as the ban screen reloading when a ban is lifted.
           // (Approvals already signal the user via the "you are now mod" key
           // delivery, so only the reject path needs this push.)
-          const live = Object.assign({ live: true }, appStatusPayload(app.deviceId));
+          const live = Object.assign(
+            { live: true },
+            appStatusPayload(app.deviceId, false),
+          );
           for (const [, s] of io().sockets.sockets)
             if (s.deviceId === app.deviceId && !s.isDev && !s.isMod)
               s.emit("mod application status", live);
