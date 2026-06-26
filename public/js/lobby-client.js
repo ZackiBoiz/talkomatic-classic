@@ -915,6 +915,35 @@ function showBanScreen(info) {
     tick();
     setInterval(tick, 1000);
   }
+
+  // Poll for an early lift (a dev accepting the appeal, unblocking the IP, or
+  // shortening the ban). The socket stays refused while blocked, so this checks
+  // over plain HTTP and reloads the moment the ban is gone. It also re-checks
+  // immediately when the tab is focused, so coming back feels instant.
+  let banLifted = false;
+  const checkLifted = () => {
+    if (banLifted) return;
+    fetch("/api/v1/ban-status", { credentials: "same-origin", cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (banLifted || !d || d.banned) return;
+        banLifted = true;
+        // The lobby reads this once after the reload to welcome the user back.
+        try {
+          sessionStorage.setItem("tk_ban_lifted", "1");
+        } catch (_) {}
+        const sub = document.querySelector("#banScreen .ban-sub");
+        if (sub) {
+          sub.textContent =
+            "Good news - your ban has been lifted. Reloading...";
+          sub.style.color = "#57d9a3";
+        }
+        setTimeout(() => window.location.reload(), 1200);
+      })
+      .catch(() => {});
+  };
+  setInterval(checkLifted, 20000);
+  document.addEventListener("visibilitychange", checkLifted);
 }
 
 function formatBanRemaining(ms) {
@@ -2945,6 +2974,21 @@ function updateStaffLink() {
   }
 }
 updateStaffLink();
+// If the ban screen just reloaded us because a ban was lifted, welcome the user
+// back once. The flag is set on the ban screen right before it reloads.
+try {
+  if (sessionStorage.getItem("tk_ban_lifted")) {
+    sessionStorage.removeItem("tk_ban_lifted");
+    setTimeout(() => {
+      if (window.toastr)
+        toastr.success(
+          "Your ban has been lifted. Welcome back to Talkomatic!",
+          "Unbanned",
+          { timeOut: 9000, closeButton: true },
+        );
+    }, 1200);
+  }
+} catch (_) {}
 if (window.location.hash === "#staff") setTimeout(openStaffKeyEntry, 700);
 window.addEventListener("hashchange", () => {
   if (window.location.hash === "#staff") openStaffKeyEntry();

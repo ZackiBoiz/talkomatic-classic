@@ -595,6 +595,23 @@ app.post(`${API}/appeal`, (req, res) => {
   }
 });
 
+// Is the requester's IP still blocked? The ban screen polls this over HTTP
+// (which works while the socket is refused) so it can reload itself the moment
+// a ban is lifted, instead of stranding the user until they refresh by hand.
+app.get(`${API}/ban-status`, (req, res) => {
+  const ip = getClientIP(req);
+  const block = state.blockedIPs.get(ip);
+  const expiry = block && typeof block === "object" ? block.expiry : block;
+  const banned =
+    !!block &&
+    (!expiry || expiry === Number.MAX_SAFE_INTEGER || Date.now() < expiry);
+  res.json({
+    banned,
+    permanent: banned && expiry >= Number.MAX_SAFE_INTEGER,
+    expiry: banned ? expiry : 0,
+  });
+});
+
 // Emoji list, cached in memory for an hour
 const emojiCache = { data: null, ts: 0 };
 app.get("/js/emojiList.json", async (req, res) => {
