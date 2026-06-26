@@ -2634,7 +2634,7 @@ function updateRoomInfo(data) {
   // "room joined" sends roomType, "room update" sends type
   const roomType = data.roomType || data.type;
   if (typeEl && roomType) {
-    typeEl.textContent = `${getRoomTypeDisplay(roomType)} Room`;
+    typeEl.textContent = `${getRoomTypeDisplay(roomType) || "Public"} Room`;
   }
 
   if (!document.getElementById("emotesButton")) createEmotesDropdown();
@@ -2922,15 +2922,11 @@ function updateTimeLabels() {
 }
 
 function msToTime(duration) {
-  let seconds = parseInt((duration / 1000) % 60),
+  const seconds = parseInt((duration / 1000) % 60),
     minutes = parseInt((duration / (1000 * 60)) % 60),
     hours = parseInt((duration / (1000 * 60 * 60))); // no modulo here. max res is hrs
 
-  hours = (hours < 10) ? "0" + hours : hours;
-  minutes = (minutes < 10) ? "0" + minutes : minutes;
-  seconds = (seconds < 10) ? "0" + seconds : seconds;
-
-  return (hours > 0 ? hours + ":" : "") + minutes + ":" + seconds;
+  return (hours > 0 ? hours + ":" : "") + minutes.padStart(2, "0") + ":" + seconds.padStart(2, "0");
 }
 
 // ── 16. SOCKET EVENT HANDLERS ───────────────────────────────────────────────
@@ -4324,7 +4320,7 @@ function renderSpectate(data) {
   const rn = document.querySelector(".second-navbar .room-name");
   const ru = document.querySelector(".second-navbar .room-uptime");
   const rid = document.querySelector(".second-navbar .room-id");
-  if (rt) rt.textContent = `${data.roomType || "public"} room`;
+  if (rt) rt.textContent = `${getRoomTypeDisplay(data.roomType) || "Public"} room`;
   if (rn) rn.textContent = data.roomName || "*";
   if (ru) ru.textContent = currentRoomCreatedAt > 0 ? msToTime(Date.now() - currentRoomCreatedAt) : "";
   if (rid) rid.textContent = data.roomId ? "Room ID: " + data.roomId : "*";
