@@ -478,7 +478,7 @@ async function loadEmotes() {
     const resp = await fetch(`https://raw.githubusercontent.com/ZackiBoiz/Multiplayer-Piano-Optimizations/refs/heads/main/emotes/meta.jsonc?_=${Date.now()}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const pairs = parseJSONC(await resp.text());
-    const validCode = /^[A-Za-z0-9_-.]+$/;
+    const validCode = /^[A-Za-z0-9_.-]+$/;
     const validExt = /^(?:png|gif|webp|jpe?g|avif|heif|tiff|bmp|svg)$/i;
     emoteList = Object.fromEntries(
       Object.entries(pairs)
