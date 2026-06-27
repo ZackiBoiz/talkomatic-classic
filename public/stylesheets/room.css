@@ -1728,9 +1728,14 @@ html {
 }
 
 .second-navbar .room-id {
-  flex: 1;
   text-align: right;
   white-space: nowrap;
+}
+
+.second-navbar .room-uptime {
+  flex: 1;
+  color: #28a745;
+  text-align: right;
 }
 
 /* Mobile */

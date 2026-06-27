@@ -32,6 +32,7 @@ let currentRoomLayout = "horizontal";
 // "follow the room's layout".
 let userLayoutPreference = null;
 let currentRoomName = "";
+let currentRoomCreatedAt = 0;
 let lastSentMessage = "";
 let chatInput = null;
 // Socket protocol this client speaks. Must match CONFIG.VERSIONS.PROTOCOL on
@@ -92,22 +93,28 @@ const ERROR_CODES = {
 let clientWordFilter = null;
 let wordFilterEnabled = true;
 
+function hasEmote(code) {
+  return Object.prototype.hasOwnProperty.call(emoteList, code);
+}
+
 // Filters text in segments around valid :code: emote tokens so emote codes
 // containing filtered substrings still render instead of becoming asterisks.
 // Unknown ":notanemote:" tokens are plain text and stay filterable.
 function filterTextPreservingEmotes(text) {
-  if (!text.includes(":")) {
+  if (!text.includes(":") && !text.includes(";")) {
     return clientWordFilter.filterText(text);
   }
 
-  const regex = /:([\w]+):/g;
+  const regex = /(:([\w]+):|;([\w]+);)/g;
   let result = "";
   let lastIndex = 0;
   let foundEmote = false;
   let match;
 
+
   while ((match = regex.exec(text)) !== null) {
-    if (!emoteList[match[1]]) continue;
+    const code = match[2] || match[3];
+    if (!code || !hasEmote(code)) continue;
     foundEmote = true;
     result += clientWordFilter.filterText(text.slice(lastIndex, match.index));
     result += match[0];
@@ -216,7 +223,7 @@ function showInfoModal(message, callback = null) {
   showModal("Information", message, {
     showCancel: false,
     confirmText: "OK",
-    callback: callback || (() => {}),
+    callback: callback || (() => { }),
   });
 }
 
@@ -282,10 +289,10 @@ const muteIcon = document.getElementById("muteIcon");
 let soundEnabled = true;
 
 function playJoinSound() {
-  if (soundEnabled) joinSound.play().catch(() => {});
+  if (soundEnabled) joinSound.play().catch(() => { });
 }
 function playLeaveSound() {
-  if (soundEnabled) leaveSound.play().catch(() => {});
+  if (soundEnabled) leaveSound.play().catch(() => { });
 }
 function toggleMute() {
   soundEnabled = !soundEnabled;
@@ -311,7 +318,9 @@ function getPlainText(element) {
       t += node.textContent;
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       if (node.nodeName === "IMG" && node.dataset.emoteCode) {
-        t += `:${node.dataset.emoteCode}:`;
+        t += node.dataset.emoteOverlay === "true"
+          ? `;${node.dataset.emoteCode};`
+          : `:${node.dataset.emoteCode}:`;
       } else if (node.nodeName === "BR") {
         t += "\n";
       } else if (node.nodeName === "DIV") {
@@ -340,7 +349,7 @@ function placeCursorAtEnd(el) {
     const s = window.getSelection();
     s.removeAllRanges();
     s.addRange(r);
-  } catch {}
+  } catch { }
 }
 
 // Returns the caret position as a plain-text offset (emotes count as the
@@ -462,12 +471,26 @@ let selectedEmoteIndex = -1;
 let filteredEmotes = [];
 let currentEmotePrefix = "";
 let currentEmoteInfo = null;
+let useOverlayEmotes = false;
 
 async function loadEmotes() {
   try {
-    const resp = await fetch("/js/emojiList.json?v=1.0.1");
+    const resp = await fetch(`https://raw.githubusercontent.com/ZackiBoiz/Multiplayer-Piano-Optimizations/refs/heads/main/emotes/meta.jsonc?_=${Date.now()}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    emoteList = await resp.json();
+    const pairs = parseJSONC(await resp.text());
+    const validCode = /^[A-Za-z0-9_.-]+$/;
+    const validExt = /^(?:png|gif|webp|jpe?g|avif|heif|tiff|bmp|svg)$/i;
+    emoteList = Object.fromEntries(
+      Object.entries(pairs)
+        .filter(([name, ext]) =>
+          validCode.test(name) &&
+          typeof ext === "string" &&
+          validExt.test(ext)
+        )
+        .map(([name, ext]) => [name,
+          `https://raw.githubusercontent.com/ZackiBoiz/Multiplayer-Piano-Optimizations/refs/heads/main/emotes/assets/${name}.${ext}`,
+        ]),
+    );
     console.log("Emotes loaded:", Object.keys(emoteList).length);
   } catch (err) {
     console.error("Error loading emotes:", err);
@@ -475,33 +498,233 @@ async function loadEmotes() {
   }
 }
 
-// Converts :code: tokens in an element to emote <img> elements, preserving
-// the caret if the element is focused
+function parseJSONC(input) {
+  const json = stripJSONC(input);
+  return JSON.parse(json);
+}
+
+function stripJSONC(input) {
+  let out = "";
+  let i = 0;
+
+  let inString = false;
+  let stringQuote = "";
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  while (i < input.length) {
+    const ch = input[i];
+    const next = input[i + 1];
+
+    if (inLineComment) {
+      if (ch === "\n") {
+        inLineComment = false;
+        out += ch;
+      }
+      i++;
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (ch === "*" && next === "/") {
+        inBlockComment = false;
+        i += 2;
+      } else {
+        i++;
+      }
+      continue;
+    }
+
+    if (inString) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === stringQuote) {
+        inString = false;
+      }
+      i++;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringQuote = ch;
+      out += ch;
+      i++;
+      continue;
+    }
+
+    if (ch === "/" && next === "/") {
+      inLineComment = true;
+      i += 2;
+      continue;
+    }
+
+    if (ch === "/" && next === "*") {
+      inBlockComment = true;
+      i += 2;
+      continue;
+    }
+
+    out += ch;
+    i++;
+  }
+
+  return removeTrailingCommas(out);
+}
+
+function removeTrailingCommas(input) {
+  let out = "";
+  let i = 0;
+
+  let inString = false;
+  let stringQuote = "";
+  let escaped = false;
+
+  while (i < input.length) {
+    const ch = input[i];
+
+    if (inString) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === stringQuote) {
+        inString = false;
+      }
+      i++;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringQuote = ch;
+      out += ch;
+      i++;
+      continue;
+    }
+
+    if (ch === ",") {
+      let j = i + 1;
+      while (j < input.length && /\s/.test(input[j])) j++;
+
+      if (input[j] === "}" || input[j] === "]") {
+        i++;
+        continue;
+      }
+    }
+
+    out += ch;
+    i++;
+  }
+
+  return out;
+}
+
+function createEmoteNode(emoteCode, isOverlay = false) {
+  const img = document.createElement("img");
+  img.src = emoteList[emoteCode];
+  img.alt = isOverlay ? `;${emoteCode};` : `:${emoteCode}:`;
+  img.title = img.alt;
+  img.className = isOverlay ? "emote emote-overlay" : "emote";
+  img.dataset.emoteCode = emoteCode;
+  if (isOverlay) img.dataset.emoteOverlay = "true";
+  else delete img.dataset.emoteOverlay;
+  img.decoding = "async";
+  return img;
+}
+
 function replaceEmotes(element) {
   if (!element) return;
   const text = getPlainText(element);
-  if (!text.includes(":")) return;
-  const regex = /:([\w]+):/g;
-  if (!regex.test(text)) return;
-  regex.lastIndex = 0;
+  if (!text.includes(":") && !text.includes(";")) return;
+
+  const tokenRegex = /(:([\w]+):|;([\w]+);)/g;
+  const matches = [...text.matchAll(tokenRegex)];
+  if (matches.length === 0) return;
+
   const isActive = document.activeElement === element;
-  let cursorPos = 0;
-  if (isActive) cursorPos = getCursorPosition(element);
-  let html = "",
-    lastIdx = 0,
-    match,
-    changed = false;
-  while ((match = regex.exec(text)) !== null) {
-    if (emoteList[match[1]]) {
-      changed = true;
-      html += text.substring(lastIdx, match.index);
-      html += `<img src="${emoteList[match[1]]}" alt=":${match[1]}:" title=":${match[1]}:" class="emote" data-emote-code="${match[1]}">`;
-      lastIdx = match.index + match[0].length;
+  const cursorPos = isActive ? getCursorPosition(element) : 0;
+  const frag = document.createDocumentFragment();
+  let lastIndex = 0;
+  let changed = false;
+
+  const appendText = (value) => {
+    if (value) frag.appendChild(document.createTextNode(value));
+  };
+
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i];
+    const tokenStart = match.index ?? 0;
+    const tokenEnd = tokenStart + match[0].length;
+
+    appendText(text.slice(lastIndex, tokenStart));
+
+    const normalCode = match[2];
+    const overlayCode = match[3];
+    const code = normalCode || overlayCode;
+
+    if (!code || !hasEmote(code)) {
+      appendText(match[0]);
+      lastIndex = tokenEnd;
+      continue;
     }
+
+    if (normalCode) {
+      const stack = [{ code, isOverlay: false }];
+      let consumedEnd = tokenEnd;
+      let j = i + 1;
+
+      while (j < matches.length) {
+        const next = matches[j];
+        const nextStart = next.index ?? consumedEnd;
+        const between = text.slice(consumedEnd, nextStart);
+
+        if (!/^\s*$/.test(between)) break;
+        if (!next[3] || !hasEmote(next[3])) break;
+
+        stack.push({ code: next[3], isOverlay: true });
+        consumedEnd = nextStart + next[0].length;
+        j++;
+      }
+
+      if (stack.length > 1) {
+        const stackWrap = document.createElement("span");
+        stackWrap.className = "emote-stack";
+        stack.forEach((token, idx) => {
+          const img = createEmoteNode(token.code, token.isOverlay);
+          img.style.zIndex = String(idx + 1);
+          stackWrap.appendChild(img);
+        });
+        frag.appendChild(stackWrap);
+        changed = true;
+        lastIndex = consumedEnd;
+        i = j - 1;
+        continue;
+      }
+
+      frag.appendChild(createEmoteNode(code, false));
+      changed = true;
+      lastIndex = tokenEnd;
+      continue;
+    }
+
+    // stray overlay emotes render as normal emotes unless they are attached to a normal emote on their left.
+    frag.appendChild(createEmoteNode(code, false));
+    changed = true;
+    lastIndex = tokenEnd;
   }
+
+  appendText(text.slice(lastIndex));
+
   if (!changed) return;
-  html += text.substring(lastIdx);
-  element.innerHTML = html;
+
+  element.innerHTML = "";
+  element.appendChild(frag);
   if (isActive) {
     try {
       setCursorPosition(element, cursorPos);
@@ -537,12 +760,113 @@ function findEmoteAtCursor() {
 
   const text = node.textContent;
   let start = offset - 1;
-  while (start >= 0 && text[start] !== ":") start--;
-  if (start >= 0 && text[start] === ":") {
+  while (start >= 0 && text[start] !== ":" && text[start] !== ";") start--;
+  if (start >= 0 && (text[start] === ":" || text[start] === ";")) {
+    const delimiter = text[start];
     const prefix = text.substring(start + 1, offset);
-    if (prefix) return { node, prefix, startPos: start, endPos: offset };
+    if (prefix) {
+      return {
+        node,
+        prefix,
+        delimiter,
+        isOverlayQuery: delimiter === ";",
+        startPos: start,
+        endPos: offset,
+      };
+    }
   }
   return null;
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function findSubsequencePositions(source, query) {
+  const positions = [];
+  let startIndex = 0;
+
+  for (const ch of query) {
+    const idx = source.indexOf(ch, startIndex);
+    if (idx === -1) return null;
+    positions.push(idx);
+    startIndex = idx + 1;
+  }
+
+  return positions;
+}
+
+function buildHighlightedText(text, positions, contiguousStart = null, contiguousEnd = null) {
+  if (!positions || positions.length === 0) return escapeHtml(text);
+
+  let out = "";
+  const posSet = new Set(positions);
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = escapeHtml(text[i]);
+    if (contiguousStart !== null && contiguousEnd !== null) { // cleaner highlighting than a <strong> on every char
+      if (i === contiguousStart) out += "<strong style='color: #ff9800'>";
+      out += ch;
+      if (i === contiguousEnd - 1) out += "</strong>";
+      continue;
+    }
+
+    if (posSet.has(i)) out += `<strong style='color: #ff9800'>${ch}</strong>`;
+    else out += ch;
+  }
+
+  return out;
+}
+
+function getEmoteAutocompleteMatches(prefix) {
+  const q = prefix.toLowerCase();
+  const results = [];
+
+  for (const code of Object.keys(emoteList)) {
+    const lower = code.toLowerCase();
+
+    if (lower === q) {
+      results.push({
+        code,
+        bucket: 0,
+        html: buildHighlightedText(code, [0], 0, q.length),
+      });
+      continue;
+    }
+
+    const substringPos = lower.indexOf(q);
+    if (substringPos !== -1) {
+      const positions = Array.from({ length: q.length }, (_, i) => substringPos + i);
+      results.push({
+        code,
+        bucket: 1,
+        html: buildHighlightedText(code, positions, substringPos, substringPos + q.length),
+      });
+      continue;
+    }
+
+    const subsequencePositions = findSubsequencePositions(lower, q);
+    if (subsequencePositions) {
+      results.push({
+        code,
+        bucket: 2,
+        html: buildHighlightedText(code, subsequencePositions),
+      });
+    }
+  }
+
+  results.sort((a, b) => { // sorting by buckets
+    return a.bucket - b.bucket ||
+      a.code.length - b.code.length ||
+      a.code.localeCompare(b.code)
+  });
+
+  return results;
 }
 
 function showAutocomplete(prefix) {
@@ -550,14 +874,16 @@ function showAutocomplete(prefix) {
     hideAutocomplete();
     return;
   }
-  filteredEmotes = Object.keys(emoteList)
-    .filter((c) => c.toLowerCase().startsWith(prefix.toLowerCase()))
-    .slice(0, 10);
-  if (filteredEmotes.length === 0) {
+
+  const matches = getEmoteAutocompleteMatches(prefix);
+  if (matches.length === 0) {
     hideAutocomplete();
     return;
   }
+
+  filteredEmotes = matches;
   currentEmoteInfo = findEmoteAtCursor();
+
   if (!emoteAutocomplete) {
     emoteAutocomplete = document.getElementById("emoteAutocomplete");
     if (!emoteAutocomplete) {
@@ -567,36 +893,45 @@ function showAutocomplete(prefix) {
       document.body.appendChild(emoteAutocomplete);
     }
   }
+
   const sel = window.getSelection();
   if (sel.rangeCount === 0) {
     hideAutocomplete();
     return;
   }
   const rect = sel.getRangeAt(0).getBoundingClientRect();
+
   emoteAutocomplete.innerHTML = "";
   const header = document.createElement("div");
   header.className = "emote-autocomplete-header";
   header.textContent = "Emoticons";
   emoteAutocomplete.appendChild(header);
+
   const list = document.createElement("div");
   list.className = "emote-autocomplete-list";
-  filteredEmotes.forEach((code, i) => {
+
+  filteredEmotes.forEach((match, i) => {
     const item = document.createElement("div");
     item.className =
       "emote-autocomplete-item" + (i === selectedEmoteIndex ? " selected" : "");
+
     const img = document.createElement("img");
-    img.src = emoteList[code];
-    img.alt = `:${code}:`;
+    img.src = EMOTE_IMAGE_PLACEHOLDER;
+    img.dataset.src = emoteList[match.code];
+    img.alt = `:${match.code}:`;
+    img.decoding = "async";
+
     const span = document.createElement("span");
-    span.textContent = code;
+    span.innerHTML = match.html;
     span.style.fontFamily = "monospace";
+
     item.appendChild(img);
     item.appendChild(span);
     item.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
       const info = currentEmoteInfo ? { ...currentEmoteInfo } : null;
-      setTimeout(() => insertEmote(code, info), 0);
+      setTimeout(() => insertEmote(match.code, info), 0);
     });
     item.addEventListener("mouseover", () => {
       selectedEmoteIndex = i;
@@ -604,16 +939,19 @@ function showAutocomplete(prefix) {
     });
     list.appendChild(item);
   });
+
+  const loadVisibleImages = () => hydrateVisibleEmoteImages(list);
+  list.addEventListener("scroll", loadVisibleImages, { passive: true });
+
   emoteAutocomplete.appendChild(list);
   emoteAutocomplete.style.top = `${rect.bottom + window.scrollY + 5}px`;
   emoteAutocomplete.style.left = `${rect.left + window.scrollX}px`;
   emoteAutocomplete.style.display = "block";
   autocompleteActive = true;
   currentEmotePrefix = prefix;
-  if (filteredEmotes.length > 0 && selectedEmoteIndex < 0) {
-    selectedEmoteIndex = 0;
-    updateSelectedEmote();
-  }
+  selectedEmoteIndex = 0;
+  updateSelectedEmote();
+  requestAnimationFrame(loadVisibleImages);
 }
 
 function hideAutocomplete() {
@@ -648,7 +986,7 @@ function handleEmoteNavigation(e) {
         selectedEmoteIndex >= 0 &&
         selectedEmoteIndex < filteredEmotes.length
       ) {
-        insertEmote(filteredEmotes[selectedEmoteIndex], currentEmoteInfo);
+        insertEmote(filteredEmotes[selectedEmoteIndex].code, currentEmoteInfo);
         return true;
       }
       break;
@@ -690,24 +1028,139 @@ function ensureCaretInTextNode() {
   }
 }
 
-function insertEmote(emoteCode, emoteInfo) {
+function getLastDescendant(node) {
+  let cur = node;
+  while (cur && cur.lastChild) cur = cur.lastChild;
+  return cur;
+}
+
+function getFirstDescendant(node) {
+  let cur = node;
+  while (cur && cur.firstChild) cur = cur.firstChild;
+  return cur;
+}
+
+function previousDomNode(node) {
+  if (!node || !node.parentNode) return null;
+  if (node.previousSibling) return getLastDescendant(node.previousSibling);
+  return previousDomNode(node.parentNode);
+}
+
+function nextDomNode(node) {
+  if (!node || !node.parentNode) return null;
+  if (node.nextSibling) return getFirstDescendant(node.nextSibling);
+  return nextDomNode(node.parentNode);
+}
+
+function getEmoteDeletionTarget(node) {
+  if (!node) return null;
+  if (node.nodeType === Node.ELEMENT_NODE && node.classList?.contains("emote-stack")) {
+    return node;
+  }
+  if (node.nodeName === "IMG" && node.dataset.emoteCode) {
+    return node.closest?.(".emote-stack") || node;
+  }
+  return null;
+}
+
+function deleteEmoteNodeAtCaret(direction) {
+  if (!chatInput) return false;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return false;
+
+  const range = sel.getRangeAt(0);
+  if (!range.collapsed) return false;
+
+  let candidate = null;
+  const container = range.startContainer;
+  const offset = range.startOffset;
+
+  if (container.nodeType === Node.TEXT_NODE) {
+    if (direction === "backward") {
+      if (offset !== 0) return false;
+      candidate = previousDomNode(container);
+    } else {
+      if (offset !== (container.textContent || "").length) return false;
+      candidate = nextDomNode(container);
+    }
+  } else if (container.nodeType === Node.ELEMENT_NODE) {
+    if (direction === "backward") {
+      if (offset > 0) candidate = getLastDescendant(container.childNodes[offset - 1]);
+      else candidate = previousDomNode(container);
+    } else {
+      if (offset < container.childNodes.length) candidate = getFirstDescendant(container.childNodes[offset]);
+      else candidate = nextDomNode(container);
+    }
+  }
+
+  candidate = getEmoteDeletionTarget(candidate);
+  if (!candidate || !candidate.parentNode) return false;
+
+  const parent = candidate.parentNode;
+  const replacement = document.createTextNode("");
+  parent.insertBefore(replacement, candidate);
+  candidate.remove();
+
+  try {
+    const newRange = document.createRange();
+    newRange.setStart(replacement, 0);
+    newRange.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+    ensureCaretInTextNode();
+  } catch { }
+
+  return true;
+}
+
+function isValidEmoteInfo(info) {
+  return !!(
+    info &&
+    info.node &&
+    info.node.isConnected &&
+    chatInput &&
+    chatInput.contains(info.node)
+  );
+}
+
+function insertEmote(emoteCode, emoteInfo, options = {}) {
   if (!chatInput) return;
   chatInput.focus();
-  const html = `<img src="${emoteList[emoteCode]}" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`;
+
+  const targetInfo = isValidEmoteInfo(emoteInfo)
+    ? emoteInfo
+    : findEmoteAtCursor();
+  const useOverlayToken = options.overlay ?? (targetInfo?.isOverlayQuery ?? false);
+  const tokenText = useOverlayToken ? `;${emoteCode};` : `:${emoteCode}:`;
+
   try {
-    if (emoteInfo && emoteInfo.node && emoteInfo.node.parentNode) {
+    if (targetInfo && targetInfo.node && targetInfo.node.parentNode) {
       const sel = window.getSelection();
       const r = document.createRange();
-      r.setStart(emoteInfo.node, emoteInfo.startPos);
-      r.setEnd(emoteInfo.node, emoteInfo.endPos);
+      r.setStart(targetInfo.node, targetInfo.startPos);
+      r.setEnd(targetInfo.node, targetInfo.endPos);
       sel.removeAllRanges();
       sel.addRange(r);
     }
-    document.execCommand("insertHTML", false, html);
+
+    if (useOverlayToken) {
+      document.execCommand("insertText", false, tokenText);
+      replaceEmotes(chatInput);
+    } else {
+      const html = `<img src="${emoteList[emoteCode]}" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`;
+      document.execCommand("insertHTML", false, html);
+    }
   } catch {
     try {
-      document.execCommand("insertHTML", false, html);
-    } catch {}
+      document.execCommand(
+        useOverlayToken ? "insertText" : "insertHTML",
+        false,
+        useOverlayToken
+          ? tokenText
+          : `<img src="${emoteList[emoteCode]}" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`,
+      );
+      if (useOverlayToken) replaceEmotes(chatInput);
+    } catch { }
   }
 
   ensureCaretInTextNode();
@@ -853,6 +1306,35 @@ function applySelfFilter() {
   }
 }
 
+
+const EMOTE_IMAGE_PLACEHOLDER =
+  "data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA="; // blank
+
+function isEmoteImageVisible(img, container) {
+  if (!img || !container) return false;
+  const itemRect = img.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+
+  return (
+    itemRect.bottom > containerRect.top &&
+    itemRect.top < containerRect.bottom + containerRect.height && // be lenient and lazy-load emotes that are just out of reach (seamless)
+    itemRect.right > containerRect.left &&
+    itemRect.left < containerRect.right
+  );
+}
+
+function hydrateVisibleEmoteImages(dropdown) {
+  if (!dropdown) return;
+  const images = dropdown.querySelectorAll("img[data-src]");
+  images.forEach((img) => {
+    if (!isEmoteImageVisible(img, dropdown)) return;
+    const src = img.dataset.src;
+    if (!src) return;
+    img.src = src;
+    img.removeAttribute("data-src");
+  });
+}
+
 // Builds the Emoticons button beside .room-type (wrapped in a group so the
 // room type display is never replaced) and the emote picker dropdown
 function createEmotesDropdown() {
@@ -873,12 +1355,38 @@ function createEmotesDropdown() {
   dropdown.style.position = "absolute";
   dropdown.style.zIndex = "10000";
 
+  const header = document.createElement("div");
+  header.className = "emotes-dropdown-header";
+
+  const toggleLabel = document.createElement("label");
+  toggleLabel.className = "emotes-dropdown-toggle";
+
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  toggle.checked = useOverlayEmotes;
+  toggle.addEventListener("change", () => {
+    useOverlayEmotes = toggle.checked;
+  });
+
+  const toggleText = document.createElement("span");
+  toggleText.textContent = "Use overlay emotes";
+
+  toggleLabel.appendChild(toggle);
+  toggleLabel.appendChild(toggleText);
+  header.appendChild(toggleLabel);
+  dropdown.appendChild(header);
+
+  const list = document.createElement("div");
+  list.className = "emotes-dropdown-list";
+
   Object.entries(emoteList).forEach(([code, url]) => {
     const item = document.createElement("div");
     item.className = "emote-item";
     const img = document.createElement("img");
-    img.src = url;
+    img.src = EMOTE_IMAGE_PLACEHOLDER;
+    img.dataset.src = url;
     img.alt = `:${code}:`;
+    img.decoding = "async";
     const name = document.createElement("span");
     name.textContent = code;
     item.appendChild(img);
@@ -890,12 +1398,18 @@ function createEmotesDropdown() {
       setTimeout(() => {
         if (chatInput) {
           chatInput.focus();
-          insertEmote(code, null);
+          insertEmote(code, null, { overlay: useOverlayEmotes });
         }
       }, 0);
     });
-    dropdown.appendChild(item);
+    list.appendChild(item);
   });
+
+  const loadVisibleImages = () => hydrateVisibleEmoteImages(list);
+  list.addEventListener("scroll", loadVisibleImages, { passive: true });
+  window.addEventListener("resize", loadVisibleImages, { passive: true });
+
+  dropdown.appendChild(list);
 
   button.addEventListener("click", (e) => {
     e.preventDefault();
@@ -909,6 +1423,7 @@ function createEmotesDropdown() {
       dropdown.style.top = `${rect.bottom + window.scrollY + 5}px`;
       dropdown.style.left = `${rect.left + window.scrollX}px`;
       dropdown.style.display = "flex";
+      requestAnimationFrame(loadVisibleImages);
       if (chatInput) setTimeout(() => chatInput.focus(), 0);
     }
   });
@@ -1197,8 +1712,8 @@ function adjustVoteButtonVisibility() {
       row.classList.contains("dev-user") || !!row.querySelector(".mod-badge");
     btn.style.display =
       userCount >= MIN_USERS_FOR_VOTING &&
-      row.dataset.userId !== currentUserId &&
-      !isVisibleStaff
+        row.dataset.userId !== currentUserId &&
+        !isVisibleStaff
         ? "inline-block"
         : "none";
   });
@@ -1305,7 +1820,7 @@ function displayChatMessage(data) {
     const display = applyWordFilter(selfRawText);
     chatDiv.innerHTML = "";
     chatDiv.textContent = display;
-    if (display.includes(":")) replaceEmotes(chatDiv);
+    if (/[;:]/.test(display)) replaceEmotes(chatDiv);
     selfIsFiltered = wordFilterEnabled && clientWordFilter?.ready;
     if (isActive) {
       try {
@@ -1331,11 +1846,11 @@ function displayChatMessage(data) {
 // handles like youtube.com/@mohdmahmodi are part of the link, not just the host.
 const URL_PATTERN = new RegExp(
   "(?:https?:\\/\\/[^\\s<>\"']+)" +
-    "|(?:www\\.[^\\s<>\"']+)" +
-    "|(?:\\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?" +
-    "(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*" +
-    "\\.(?:com|net|org|io|gg|co|me|app|dev|xyz|info|link|site|online|club|live|stream|fun|top|cc|tv|to|gl|ly|us|uk|ca|eu|de|fr|es|it|nl|jp|kr|in|br|au|ru|cn|edu|gov|biz|pro|tech|store|shop|blog|news|wiki|games|chat|space|world|media|tube|ai|so|sh|fm|im|re)" +
-    "(?:[\\/?#][^\\s<>\"']*)?)",
+  "|(?:www\\.[^\\s<>\"']+)" +
+  "|(?:\\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?" +
+  "(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*" +
+  "\\.(?:com|net|org|io|gg|co|me|app|dev|xyz|info|link|site|online|club|live|stream|fun|top|cc|tv|to|gl|ly|us|uk|ca|eu|de|fr|es|it|nl|jp|kr|in|br|au|ru|cn|edu|gov|biz|pro|tech|store|shop|blog|news|wiki|games|chat|space|world|media|tube|ai|so|sh|fm|im|re)" +
+  "(?:[\\/?#][^\\s<>\"']*)?)",
   "gi",
 );
 
@@ -1796,7 +2311,7 @@ socket.on("dev hide status", (data) => {
       "talkomatic_devHidden",
       currentUserIsHidden ? "1" : "0",
     );
-  } catch (_) {}
+  } catch (_) { }
   const button = document.getElementById("devHideToggle");
   updateDevHideButton(button);
   setStaffItemLabel(
@@ -2014,11 +2529,22 @@ function createUserRow(user, container) {
         showAutocomplete(emoteInfo.prefix);
       } else hideAutocomplete();
       const text = getPlainText(div);
-      if (text.includes(":") && /:([\w]+):/.test(text)) replaceEmotes(div);
+      if (/[;:]/.test(text)) replaceEmotes(div);
       updateSentMessage();
     });
     div.addEventListener("keydown", (e) => {
       if (handleEmoteNavigation(e)) return;
+
+      if (e.key === "Backspace" || e.key === "Delete") {
+        const deleteDirection = e.key === "Backspace" ? "backward" : "forward";
+        if (deleteEmoteNodeAtCaret(deleteDirection)) {
+          e.preventDefault();
+          if (getPlainText(div).trim() === "") div.innerHTML = "";
+          if (/[;:]/.test(getPlainText(div))) replaceEmotes(div);
+          updateSentMessage();
+          return;
+        }
+      }
 
       // Ctrl/Cmd + Backspace or Delete with a selection (e.g. after Ctrl+A)
       // can leave text behind in contenteditable, so clear the selection
@@ -2096,17 +2622,19 @@ function getRoomTypeDisplay(type) {
 
 function updateRoomInfo(data) {
   const nameEl = document.querySelector(".room-name");
+  const uptimeEl = document.querySelector(".room-uptime");
   const idEl = document.querySelector(".room-id");
   const typeEl = document.querySelector(".room-type");
 
   if (nameEl)
     nameEl.textContent = `Room: ${currentRoomName || data.roomName || data.roomId}`;
+  if (uptimeEl) uptimeEl.textContent = msToTime(Date.now() - data.createdAt);
   if (idEl) idEl.textContent = `Room ID: ${data.roomId || currentRoomId}`;
 
   // "room joined" sends roomType, "room update" sends type
   const roomType = data.roomType || data.type;
   if (typeEl && roomType) {
-    typeEl.textContent = `${getRoomTypeDisplay(roomType)} Room`;
+    typeEl.textContent = `${getRoomTypeDisplay(roomType) || "Public"} room`;
   }
 
   if (!document.getElementById("emotesButton")) createEmotesDropdown();
@@ -2122,6 +2650,9 @@ function injectStyles() {
   style.setAttribute("data-emote-styles", "true");
   style.textContent = `
     .emote { display:inline-block; vertical-align:middle; width:auto; height:20px; margin:0 2px; }
+    .emote-stack { display:inline-grid; grid-template-areas:"stack"; align-items:center; justify-items:center; vertical-align:middle; margin:0 2px; line-height:0; }
+    .emote-stack > .emote { grid-area:stack; margin:0; }
+    .emote-overlay { margin:0; }
     .chat-input { background-color:black; color:orange; outline:none; white-space:pre-wrap; word-break:break-word; }
     .emote-autocomplete { position:absolute; z-index:10000; background:#333; border:1px solid #555; border-radius:4px; max-height:300px; overflow-y:auto; width:200px; box-shadow:0 3px 10px rgba(0,0,0,0.3); }
     .emote-autocomplete-header { padding:5px 10px; font-weight:bold; border-bottom:1px solid #555; color:#eee; }
@@ -2133,7 +2664,11 @@ function injectStyles() {
     .vote-button { cursor:pointer; transition:background-color 0.2s ease; }
     .vote-button.voted { background-color:#5c3d3d !important; color:#ff9090 !important; }
     .emotes-button { padding:5px 10px; background:#444; color:white; border:none; border-radius:4px; cursor:pointer; }
-    .emotes-dropdown { background:#333; border:1px solid #555; border-radius:4px; padding:10px; max-width:300px; max-height:300px; overflow-y:auto; flex-wrap:wrap; gap:5px; }
+    .emotes-dropdown { background:#333; border:1px solid #555; border-radius:4px; padding:8px; max-width:320px; max-height:340px; overflow:hidden; display:flex; flex-direction:column; gap:8px; }
+    .emotes-dropdown-header { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:2px 4px 6px; border-bottom:1px solid #555; color:#eee; }
+    .emotes-dropdown-toggle { display:inline-flex; align-items:center; gap:8px; font-size:12px; color:#fff; cursor:pointer; user-select:none; }
+    .emotes-dropdown-toggle input { accent-color:#ff9800; }
+    .emotes-dropdown-list { display:flex; flex-wrap:wrap; gap:5px; overflow-y:auto; max-height:260px; padding-top:2px; }
     .emote-item { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:5px; cursor:pointer; border-radius:4px; background:#444; width:60px; height:60px; transition:background-color 0.2s ease; }
     .emote-item:hover { background-color:#555; }
     .emote-item img { width:30px; height:auto; }
@@ -2372,16 +2907,26 @@ function copyInviteLink() {
 }
 
 const dateTimeElement = document.querySelector("#dateTime");
-function updateDateTime() {
+function updateTimeLabels() {
   const now = new Date();
   dateTimeElement.querySelector(".date").textContent = now.toLocaleDateString(
     "en-US",
     { weekday: "long", year: "numeric", month: "short", day: "numeric" },
   );
-  dateTimeElement.querySelector(".time").textContent = now.toLocaleTimeString(
-    "en-US",
-    { hour: "2-digit", minute: "2-digit", hour12: true },
-  );
+  dateTimeElement.querySelector(".time").textContent = now.toLocaleTimeString();
+
+  const uptimeEl = document.querySelector(".room-uptime");
+  if (uptimeEl) {
+    uptimeEl.textContent = currentRoomCreatedAt > 0 ? msToTime(Date.now() - currentRoomCreatedAt) : "";
+  }
+}
+
+function msToTime(duration) {
+  const seconds = parseInt((duration / 1000) % 60),
+    minutes = parseInt((duration / (1000 * 60)) % 60),
+    hours = parseInt((duration / (1000 * 60 * 60))); // no modulo here. max res is hrs
+
+  return (hours > 0 ? hours + ":" : "") + String(minutes).padStart(2, "0") + ":" + String(seconds).padStart(2, "0");
 }
 
 // ── 16. SOCKET EVENT HANDLERS ───────────────────────────────────────────────
@@ -2393,7 +2938,7 @@ socket.on("update votes", updateVotesUI);
 socket.on("kicked", (data) => {
   showInfoModal(
     (data && data.message) ||
-      "You have been removed from the room by a majority vote.",
+    "You have been removed from the room by a majority vote.",
     () => {
       window.location.href = "/index.html";
     },
@@ -2431,6 +2976,7 @@ socket.on("room joined", (data) => {
   currentRoomLayout = data.layout || currentRoomLayout;
   currentRoomName = data.roomName;
   currentRoomMaxSize = data.maxSize || 0;
+  currentRoomCreatedAt = data.createdAt || 0;
 
   currentUserIsDev = !!data.isDev;
   currentUserIsMod = !!data.isMod;
@@ -2665,7 +3211,7 @@ socket.on("error", (error) => {
   console.log(error);
   showErrorModal(
     (error.error.replaceDefaultText ? "" : "An error occurred: ") +
-      error.error.message,
+    error.error.message,
   );
 });
 
@@ -2818,7 +3364,7 @@ async function initRoom() {
 window.addEventListener("load", () => {
   injectStyles();
   initRoom();
-  updateDateTime();
+  updateTimeLabels();
   adjustLayout();
   updateInviteLink();
   initializeAppDirectory();
@@ -2903,7 +3449,7 @@ function showTabSupersededOverlay() {
   try {
     socket.io.opts.reconnection = false;
     socket.disconnect();
-  } catch (_) {}
+  } catch (_) { }
   if (!document.getElementById("supersededStyles")) {
     const st = document.createElement("style");
     st.id = "supersededStyles";
@@ -2947,7 +3493,7 @@ function debouncedViewportChange() {
   }, 100);
 }
 
-setInterval(updateDateTime, 1000);
+setInterval(updateTimeLabels, 1000);
 window.addEventListener("resize", debouncedViewportChange);
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -3200,41 +3746,41 @@ function openUserStaffMenu(user) {
       items.push(
         lvl < 2
           ? {
-              icon: '<i class="fas fa-arrow-up"></i>',
-              label: "Promote to full mod (L2)",
-              desc: "Grant full mod powers",
-              onClick: async () => {
-                if (
-                  await StaffUI.confirm({
-                    title: "Promote to L2",
-                    message: `Promote ${name} to a full (level 2) moderator?`,
-                    confirmText: "Promote",
-                  })
-                )
-                  socket.emit("dev set mod level for user", {
-                    targetUserId: user.id,
-                    level: 2,
-                  });
-              },
-            }
-          : {
-              icon: '<i class="fas fa-arrow-down"></i>',
-              label: "Demote to junior (L1)",
-              desc: "Limit them to junior powers",
-              onClick: async () => {
-                if (
-                  await StaffUI.confirm({
-                    title: "Demote to L1",
-                    message: `Demote ${name} to a junior (level 1) moderator?`,
-                    confirmText: "Demote",
-                  })
-                )
-                  socket.emit("dev set mod level for user", {
-                    targetUserId: user.id,
-                    level: 1,
-                  });
-              },
+            icon: '<i class="fas fa-arrow-up"></i>',
+            label: "Promote to full mod (L2)",
+            desc: "Grant full mod powers",
+            onClick: async () => {
+              if (
+                await StaffUI.confirm({
+                  title: "Promote to L2",
+                  message: `Promote ${name} to a full (level 2) moderator?`,
+                  confirmText: "Promote",
+                })
+              )
+                socket.emit("dev set mod level for user", {
+                  targetUserId: user.id,
+                  level: 2,
+                });
             },
+          }
+          : {
+            icon: '<i class="fas fa-arrow-down"></i>',
+            label: "Demote to junior (L1)",
+            desc: "Limit them to junior powers",
+            onClick: async () => {
+              if (
+                await StaffUI.confirm({
+                  title: "Demote to L1",
+                  message: `Demote ${name} to a junior (level 1) moderator?`,
+                  confirmText: "Demote",
+                })
+              )
+                socket.emit("dev set mod level for user", {
+                  targetUserId: user.id,
+                  level: 1,
+                });
+            },
+          },
       );
       items.push({
         icon: '<i class="fas fa-user-xmark"></i>',
@@ -3761,6 +4307,7 @@ function renderSpectate(data) {
   currentRoomId = data.roomId;
   currentRoomName = data.roomName;
   currentRoomLayout = data.layout || currentRoomLayout;
+  currentRoomCreatedAt = data.createdAt || 0;
 
   // Carry the spectator's role through so the full staff panel is available
   // while watching: devs keep every dev power (including Max room size), mods
@@ -3771,10 +4318,12 @@ function renderSpectate(data) {
 
   const rt = document.querySelector(".second-navbar .room-type");
   const rn = document.querySelector(".second-navbar .room-name");
+  const ru = document.querySelector(".second-navbar .room-uptime");
   const rid = document.querySelector(".second-navbar .room-id");
-  if (rt) rt.textContent = `${data.roomType || "public"} room`;
+  if (rt) rt.textContent = `${getRoomTypeDisplay(data.roomType) || "Public"} room`;
   if (rn) rn.textContent = data.roomName || "*";
-  if (rid) rid.textContent = data.roomId || "*";
+  if (ru) ru.textContent = currentRoomCreatedAt > 0 ? msToTime(Date.now() - currentRoomCreatedAt) : "";
+  if (rid) rid.textContent = data.roomId ? "Room ID: " + data.roomId : "*";
   const c = document.querySelector(".chat-container");
   if (c) {
     c.innerHTML = "";
@@ -3893,12 +4442,12 @@ socket.on("megaphone", (data) => {
 socket.on("party mode", () => {
   try {
     triggerDevConfetti();
-  } catch (_) {}
+  } catch (_) { }
   try {
     if (!partyHornAudio) partyHornAudio = new Audio("audio/party-horn.mp3");
     partyHornAudio.currentTime = 0;
-    partyHornAudio.play().catch(() => {});
-  } catch (_) {}
+    partyHornAudio.play().catch(() => { });
+  } catch (_) { }
 });
 socket.on("maintenance status", (data) => {
   if (data && data.enabled)
@@ -4026,7 +4575,7 @@ socket.on("staff notice", (d) => {
     const url = new URL(window.location.href);
     url.searchParams.delete("ref");
     window.history.replaceState({}, document.title, url);
-  } catch (e) {}
+  } catch (e) { }
 })();
 
 // Open the key-entry modal when the page is opened with #staff in the URL
