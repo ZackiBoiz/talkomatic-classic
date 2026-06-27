@@ -105,7 +105,7 @@ function filterTextPreservingEmotes(text) {
     return clientWordFilter.filterText(text);
   }
 
-  const regex = /(:([\w]+):|;([\w]+);)/g;
+  const regex = /(:([A-Za-z0-9_.-]+):|;([A-Za-z0-9_.-]+);)/g;
   let result = "";
   let lastIndex = 0;
   let foundEmote = false;
@@ -643,7 +643,7 @@ function replaceEmotes(element) {
   const text = getPlainText(element);
   if (!text.includes(":") && !text.includes(";")) return;
 
-  const tokenRegex = /(:([\w]+):|;([\w]+);)/g;
+  const tokenRegex = /(:([A-Za-z0-9_.-]+):|;([A-Za-z0-9_.-]+);)/g;
   const matches = [...text.matchAll(tokenRegex)];
   if (matches.length === 0) return;
 
