@@ -498,33 +498,27 @@ async function loadEmotes() {
   }
 }
 
-function parseJSONC(input) {
-  const json = stripJSONC(input);
+function parseJSONC(input, filteredTags = ["*"]) {
+  const json = stripJSONC(input, filteredTags);
   return JSON.parse(json);
 }
 
-function stripJSONC(input) {
+function stripJSONC(input, filteredTags = []) {
+  const filtered = new Set(
+    Array.isArray(filteredTags) ? filteredTags : [filteredTags]
+  );
+
   let out = "";
   let i = 0;
 
   let inString = false;
   let stringQuote = "";
   let escaped = false;
-  let inLineComment = false;
   let inBlockComment = false;
 
   while (i < input.length) {
     const ch = input[i];
     const next = input[i + 1];
-
-    if (inLineComment) {
-      if (ch === "\n") {
-        inLineComment = false;
-        out += ch;
-      }
-      i++;
-      continue;
-    }
 
     if (inBlockComment) {
       if (ch === "*" && next === "/") {
@@ -557,15 +551,36 @@ function stripJSONC(input) {
       continue;
     }
 
-    if (ch === "/" && next === "/") {
-      inLineComment = true;
+    if (ch === "/" && next === "*") {
+      inBlockComment = true;
       i += 2;
       continue;
     }
 
-    if (ch === "/" && next === "*") {
-      inBlockComment = true;
-      i += 2;
+    if (ch === "/" && next === "/") {
+      const lineStart = out.lastIndexOf("\n") + 1;
+      const lineBeforeComment = out.slice(lineStart);
+      const trimmed = lineBeforeComment.trimEnd();
+
+      const propMatch = trimmed.match(
+        /(?:^|,)\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:\s*.*$/
+      );
+
+      if (propMatch) {
+        const commentText = input.slice(i + 2, input.indexOf("\n", i) === -1 ? input.length : input.indexOf("\n", i));
+        const tags = commentText
+          .split(";")
+          .map(s => s.trim())
+          .filter(Boolean);
+
+        if (tags.some(tag => filtered.has(tag))) {
+          out = out.slice(0, lineStart);
+          while (i < input.length && input[i] !== "\n") i++;
+          continue;
+        }
+      }
+
+      while (i < input.length && input[i] !== "\n") i++;
       continue;
     }
 
