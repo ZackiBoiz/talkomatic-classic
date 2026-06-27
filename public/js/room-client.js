@@ -498,7 +498,7 @@ async function loadEmotes() {
   }
 }
 
-function parseJSONC(input, filteredTags = ["*"]) {
+function parseJSONC(input, filteredTags = ["*"]) { // "*" represents unwanted, not wildcard
   const json = stripJSONC(input, filteredTags);
   return JSON.parse(json);
 }

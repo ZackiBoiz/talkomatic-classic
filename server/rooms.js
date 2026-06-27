@@ -128,7 +128,7 @@ function deviceTypeFromUA(ua) {
   if (/(android automotive|androidauto|carplay|tesla|mbux|sync|qtcarbrowser)/i.test(s))
     return "car";
 
-  if (/(blackberry|nokia)/i.test(s))
+  if (/(blackberry|nokia)/i.test(s) && !/android/i.test(s))
     return "qwerty";
 
   if (/(mobi|iphone|ipod|android|bb10|iemobile|opera mini|windows phone)/i.test(s))
