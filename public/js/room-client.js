@@ -105,7 +105,7 @@ function filterTextPreservingEmotes(text) {
     return clientWordFilter.filterText(text);
   }
 
-  const regex = /(:([\w]+):|;([\w]+);)/g;
+  const regex = /(:([A-Za-z0-9_.-]+):|;([A-Za-z0-9_.-]+);)/g;
   let result = "";
   let lastIndex = 0;
   let foundEmote = false;
@@ -498,33 +498,27 @@ async function loadEmotes() {
   }
 }
 
-function parseJSONC(input) {
-  const json = stripJSONC(input);
+function parseJSONC(input, filteredTags = ["*"]) { // "*" represents unwanted, not wildcard
+  const json = stripJSONC(input, filteredTags);
   return JSON.parse(json);
 }
 
-function stripJSONC(input) {
+function stripJSONC(input, filteredTags = []) {
+  const filtered = new Set(
+    Array.isArray(filteredTags) ? filteredTags : [filteredTags]
+  );
+
   let out = "";
   let i = 0;
 
   let inString = false;
   let stringQuote = "";
   let escaped = false;
-  let inLineComment = false;
   let inBlockComment = false;
 
   while (i < input.length) {
     const ch = input[i];
     const next = input[i + 1];
-
-    if (inLineComment) {
-      if (ch === "\n") {
-        inLineComment = false;
-        out += ch;
-      }
-      i++;
-      continue;
-    }
 
     if (inBlockComment) {
       if (ch === "*" && next === "/") {
@@ -557,15 +551,36 @@ function stripJSONC(input) {
       continue;
     }
 
-    if (ch === "/" && next === "/") {
-      inLineComment = true;
+    if (ch === "/" && next === "*") {
+      inBlockComment = true;
       i += 2;
       continue;
     }
 
-    if (ch === "/" && next === "*") {
-      inBlockComment = true;
-      i += 2;
+    if (ch === "/" && next === "/") {
+      const lineStart = out.lastIndexOf("\n") + 1;
+      const lineBeforeComment = out.slice(lineStart);
+      const trimmed = lineBeforeComment.trimEnd();
+
+      const propMatch = trimmed.match(
+        /(?:^|,)\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:\s*.*$/
+      );
+
+      if (propMatch) {
+        const commentText = input.slice(i + 2, input.indexOf("\n", i) === -1 ? input.length : input.indexOf("\n", i));
+        const tags = commentText
+          .split(";")
+          .map(s => s.trim())
+          .filter(Boolean);
+
+        if (tags.some(tag => filtered.has(tag))) {
+          out = out.slice(0, lineStart);
+          while (i < input.length && input[i] !== "\n") i++;
+          continue;
+        }
+      }
+
+      while (i < input.length && input[i] !== "\n") i++;
       continue;
     }
 
@@ -643,7 +658,7 @@ function replaceEmotes(element) {
   const text = getPlainText(element);
   if (!text.includes(":") && !text.includes(";")) return;
 
-  const tokenRegex = /(:([\w]+):|;([\w]+);)/g;
+  const tokenRegex = /(:([A-Za-z0-9_.-]+):|;([A-Za-z0-9_.-]+);)/g;
   const matches = [...text.matchAll(tokenRegex)];
   if (matches.length === 0) return;
 
@@ -2329,6 +2344,7 @@ socket.on("dev hide status", (data) => {
 const DEVICE_META = {
   desktop: { icon: "fas fa-desktop", title: "Desktop" },
   mobile: { icon: "fas fa-mobile-screen-button", title: "Mobile" },
+  qwerty: { icon: "fas fa-tty", title: "QWERTY Phone" },
   tablet: { icon: "fas fa-tablet-screen-button", title: "Tablet" },
   tv: { icon: "fas fa-tv", title: "TV" },
   vr: { icon: "fas fa-vr-cardboard", title: "VR" },
