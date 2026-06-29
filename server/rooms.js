@@ -349,8 +349,18 @@ function pianoDropPresence(roomId, userId, clearMute) {
     crownChanged = true;
   }
   if (!io()) return;
-  if (wasOpen) io().to(roomId).emit("piano user status", { userId, open: false });
-  if (crownChanged) io().to(roomId).emit("piano crown", pianoMeta(roomId));
+  if (wasOpen) {
+    // Hide a vanished dev's departure from non-devs, the same way their arrival
+    // and activity are hidden.
+    const room = state.rooms.get(roomId);
+    const u = room && room.users.find((x) => x.id === userId);
+    const hide = !!(u && u.isDev && u.isVanished);
+    emitToRoomMaybeHidden(roomId, hide, "piano user status", {
+      userId,
+      open: false,
+    });
+  }
+  if (crownChanged) emitPianoCrown(roomId);
 }
 
 // ── User Counting ───────────────────────────────────────────────────────────
@@ -1337,6 +1347,71 @@ function emitRoomChatUpdate(socket, payload) {
       continue;
     if (!canRecipientSeeDevUser(recipient, senderUser)) continue;
     recipient.emit("chat update", payload);
+  }
+}
+
+// ── Sub-app (Piano / Talkoboard) broadcast helpers, vanish-aware ────────────
+// The piano and the board relay presence and activity straight to the room.
+// Left raw, those streams reveal a vanished dev to ANY client reading the
+// socket - including an unofficial one - even though room chat and typing
+// already hide them. These helpers carry the same visibility rule into the live
+// sub-apps: a vanished dev's events reach only other devs (and, when asked,
+// themselves), so an invisible admin never surfaces through the piano or board.
+// The common case (sender not vanished) keeps the fast native broadcast.
+function emitSubAppEvent(socket, event, payload, includeSender) {
+  const roomId = socket.roomId;
+  if (!roomId || !io()) return;
+  if (!socket.isVanished) {
+    if (includeSender) io().to(roomId).emit(event, payload);
+    else socket.to(roomId).emit(event, payload);
+    return;
+  }
+  for (const [, recipient] of io().sockets.sockets) {
+    if (!recipient.connected || recipient.roomId !== roomId) continue;
+    if (recipient.id === socket.id) {
+      if (includeSender) recipient.emit(event, payload);
+      continue;
+    }
+    if (recipient.isDev) recipient.emit(event, payload);
+  }
+}
+
+// Room-scoped emit for a presence drop with no originating socket (close,
+// disconnect, ghost cleanup). `hide` keeps a vanished dev's departure from
+// reaching non-devs, mirroring emitSubAppEvent.
+function emitToRoomMaybeHidden(roomId, hide, event, payload) {
+  if (!io() || !roomId) return;
+  if (!hide) {
+    io().to(roomId).emit(event, payload);
+    return;
+  }
+  for (const [, recipient] of io().sockets.sockets) {
+    if (!recipient.connected || recipient.roomId !== roomId) continue;
+    if (recipient.isDev) recipient.emit(event, payload);
+  }
+}
+
+// Crown snapshot for one recipient. A vanished dev holding the crown reads as
+// "no crown" to anyone who cannot see them, so the holder (and any lock they
+// set) never leaks through the crown broadcast.
+function pianoMetaFor(roomId, recipient) {
+  const ps = pianoState.get(roomId);
+  if (!ps) return { crown: null, crownName: null, onlyOwner: false };
+  if (ps.crown) {
+    const room = state.rooms.get(roomId);
+    const holder = room && room.users.find((u) => u.id === ps.crown);
+    if (holder && !canRecipientSeeDevUser(recipient, holder))
+      return { crown: null, crownName: null, onlyOwner: false };
+  }
+  return pianoMeta(roomId);
+}
+
+// Per-recipient crown broadcast so the redaction above reaches every viewer.
+function emitPianoCrown(roomId) {
+  if (!io()) return;
+  for (const [, recipient] of io().sockets.sockets) {
+    if (!recipient.connected || recipient.roomId !== roomId) continue;
+    recipient.emit("piano crown", pianoMetaFor(roomId, recipient));
   }
 }
 
@@ -2347,8 +2422,12 @@ function registerSocketHandlers() {
         clearAFKTimers(socket.handshake.session.userId);
 
         const bs = getBoardState(socket.roomId);
+        const room = state.rooms.get(socket.roomId);
         const activeObj = {};
         for (const [uid, stroke] of bs.active) {
+          // Hide a vanished dev's in-progress stroke from a non-dev newcomer.
+          const u = room && room.users.find((x) => x.id === uid);
+          if (u && !canRecipientSeeDevUser(socket, u)) continue;
           activeObj[uid] = stroke;
         }
         socket.emit("board state", {
@@ -2356,10 +2435,12 @@ function registerSocketHandlers() {
           active: activeObj,
         });
 
-        socket.to(socket.roomId).emit("board user status", {
-          userId: socket.handshake.session.userId,
-          open: true,
-        });
+        emitSubAppEvent(
+          socket,
+          "board user status",
+          { userId: socket.handshake.session.userId, open: true },
+          false,
+        );
       }),
     );
 
@@ -2403,7 +2484,7 @@ function registerSocketHandlers() {
         finalizeBoardUserStroke(socket.roomId, userId);
         bs.active.set(userId, stroke);
 
-        socket.to(socket.roomId).emit("board stroke start", {
+        emitSubAppEvent(socket, "board stroke start", {
           userId,
           id: stroke.id,
           color: stroke.color,
@@ -2411,7 +2492,7 @@ function registerSocketHandlers() {
           eraser: stroke.eraser,
           gradient: stroke.gradient,
           point: stroke.points[0],
-        });
+        }, false);
       }),
     );
 
@@ -2443,10 +2524,10 @@ function registerSocketHandlers() {
           active.points = active.points.slice(-MAX_POINTS_PER_STROKE);
         }
 
-        socket.to(socket.roomId).emit("board stroke move", {
+        emitSubAppEvent(socket, "board stroke move", {
           userId,
           points: validPoints,
-        });
+        }, false);
       }),
     );
 
@@ -2457,7 +2538,7 @@ function registerSocketHandlers() {
         if (socket.spectating) return;
         const userId = socket.handshake.session.userId;
         finalizeBoardUserStroke(socket.roomId, userId);
-        socket.to(socket.roomId).emit("board stroke end", { userId });
+        emitSubAppEvent(socket, "board stroke end", { userId }, false);
       }),
     );
 
@@ -2485,7 +2566,7 @@ function registerSocketHandlers() {
           if (active && active.id === id) bs.active.delete(userId);
           else return;
         }
-        socket.to(socket.roomId).emit("board stroke remove", { id });
+        emitSubAppEvent(socket, "board stroke remove", { id }, false);
       }),
     );
 
@@ -2527,7 +2608,7 @@ function registerSocketHandlers() {
           bs.strokes = bs.strokes.slice(-MAX_BOARD_STROKES);
         }
         saveBoardSoon();
-        socket.to(socket.roomId).emit("board stroke add", { userId, stroke });
+        emitSubAppEvent(socket, "board stroke add", { userId, stroke }, false);
       }),
     );
 
@@ -2539,10 +2620,12 @@ function registerSocketHandlers() {
         socket.boardOpen = false;
         finalizeBoardUserStroke(socket.roomId, userId);
         setupAFKTimers(socket, userId);
-        socket.to(socket.roomId).emit("board user status", {
-          userId,
-          open: false,
-        });
+        emitSubAppEvent(
+          socket,
+          "board user status",
+          { userId, open: false },
+          false,
+        );
       }),
     );
 
@@ -2552,12 +2635,17 @@ function registerSocketHandlers() {
         if (!socket.roomId || !socket.handshake.session?.userId) return;
         if (socket.spectating) return;
         if (typeof data?.x !== "number" || typeof data?.y !== "number") return;
-        socket.to(socket.roomId).emit("board cursor", {
-          userId: socket.handshake.session.userId,
-          username: socket.handshake.session.username || "Anonymous",
-          x: data.x,
-          y: data.y,
-        });
+        emitSubAppEvent(
+          socket,
+          "board cursor",
+          {
+            userId: socket.handshake.session.userId,
+            username: socket.handshake.session.username || "Anonymous",
+            x: data.x,
+            y: data.y,
+          },
+          false,
+        );
       }),
     );
 
@@ -2568,14 +2656,17 @@ function registerSocketHandlers() {
         if (socket.spectating) return;
         if (!data?.text || typeof data.text !== "string") return;
         const text = data.text.slice(0, 200);
-        io()
-          .to(socket.roomId)
-          .emit("board chat", {
+        emitSubAppEvent(
+          socket,
+          "board chat",
+          {
             userId: socket.handshake.session.userId,
             username: socket.handshake.session.username || "Anonymous",
             text,
             timestamp: Date.now(),
-          });
+          },
+          true,
+        );
       }),
     );
 
@@ -2620,18 +2711,26 @@ function registerSocketHandlers() {
         for (const uid of ps.open) {
           if (uid === userId) continue;
           const u = room && room.users.find((x) => x.id === uid);
+          // Hide a vanished dev at the piano from a non-dev newcomer.
+          if (u && !canRecipientSeeDevUser(socket, u)) continue;
           participants.push({ userId: uid, username: u ? u.username : "User" });
         }
         socket.emit("piano participants", { participants });
-        socket.emit("piano crown", pianoMeta(socket.roomId));
+        socket.emit("piano crown", pianoMetaFor(socket.roomId, socket));
         socket.emit("piano muted", { muted: Array.from(ps.muted) });
 
-        // Announce the newcomer to everyone else.
-        socket.to(socket.roomId).emit("piano user status", {
-          userId,
-          username: socket.handshake.session.username || "Anonymous",
-          open: true,
-        });
+        // Announce the newcomer to everyone else (hidden from non-devs when the
+        // newcomer is a vanished dev).
+        emitSubAppEvent(
+          socket,
+          "piano user status",
+          {
+            userId,
+            username: socket.handshake.session.username || "Anonymous",
+            open: true,
+          },
+          false,
+        );
       }),
     );
 
@@ -2657,6 +2756,11 @@ function registerSocketHandlers() {
           return;
 
         const ps = getPianoState(socket.roomId);
+        // Must have announced presence (be "at the piano") to broadcast. Stops a
+        // modified client from streaming notes while staying off the participant
+        // list - which would also dodge the per-user mute, since both the mute
+        // UI and presence key off ps.open.
+        if (!ps.open.has(userId)) return;
         if (ps.muted.has(userId)) return; // staff-muted: silenced server-side
 
         // "Only owner can play": only the crown holder or staff may sound notes.
@@ -2703,7 +2807,7 @@ function registerSocketHandlers() {
         }
         if (clean.length === 0) return;
 
-        socket.to(socket.roomId).emit("piano notes", { userId, notes: clean });
+        emitSubAppEvent(socket, "piano notes", { userId, notes: clean }, false);
       }),
     );
 
@@ -2713,15 +2817,23 @@ function registerSocketHandlers() {
         if (!socket.roomId || !socket.handshake.session?.userId) return;
         if (socket.spectating) return;
         if (typeof data?.x !== "number" || typeof data?.y !== "number") return;
+        // Only players actually at the piano broadcast a cursor (mirrors notes).
+        if (!getPianoState(socket.roomId).open.has(socket.handshake.session.userId))
+          return;
         // x,y are fractions (0..1) of the keyboard area, resolution-independent.
         const x = Math.max(0, Math.min(1, data.x));
         const y = Math.max(0, Math.min(1, data.y));
-        socket.to(socket.roomId).emit("piano cursor", {
-          userId: socket.handshake.session.userId,
-          username: socket.handshake.session.username || "Anonymous",
-          x,
-          y,
-        });
+        emitSubAppEvent(
+          socket,
+          "piano cursor",
+          {
+            userId: socket.handshake.session.userId,
+            username: socket.handshake.session.username || "Anonymous",
+            x,
+            y,
+          },
+          false,
+        );
       }),
     );
 
@@ -2731,44 +2843,48 @@ function registerSocketHandlers() {
         if (!socket.roomId || !socket.handshake.session?.userId) return;
         if (socket.spectating) return;
         if (!data?.text || typeof data.text !== "string") return;
+        // Only players actually at the piano may post to its chat.
+        if (!getPianoState(socket.roomId).open.has(socket.handshake.session.userId))
+          return;
         const text = sanitizeMessage(data.text).slice(0, 200);
         if (!text.trim()) return;
         // Relay raw; each client applies its own word filter on display, matching
         // the room's per-viewer automod toggle.
-        io()
-          .to(socket.roomId)
-          .emit("piano chat", {
+        emitSubAppEvent(
+          socket,
+          "piano chat",
+          {
             userId: socket.handshake.session.userId,
             username: socket.handshake.session.username || "Anonymous",
             text,
             timestamp: Date.now(),
-          });
+          },
+          true,
+        );
       }),
     );
 
-    // Claim the crown if it is free, the holder has left, or you are staff.
+    // Claim the crown. Restricted to staff (devs + mods): the crown gates the
+    // "only owner can play" lock, so only higher-level users may hold it.
     socket.on(
       "piano crown claim",
       safe(async () => {
         if (!socket.roomId || !socket.handshake.session?.userId) return;
         if (socket.spectating) return;
-        const userId = socket.handshake.session.userId;
-        const ps = getPianoState(socket.roomId);
-        const room = state.rooms.get(socket.roomId);
-        const holderPresent =
-          ps.crown && room && room.users.some((u) => u.id === ps.crown);
         const isStaff = !!(socket.isDev || socket.isMod);
-        if (ps.crown && holderPresent && ps.crown !== userId && !isStaff) {
+        if (!isStaff) {
           return socket.emit(
             "error",
             createErrorResponse(
               ERROR_CODES.FORBIDDEN,
-              "Someone already has the crown.",
+              "Only staff can hold the crown.",
             ),
           );
         }
+        const userId = socket.handshake.session.userId;
+        const ps = getPianoState(socket.roomId);
         ps.crown = userId;
-        io().to(socket.roomId).emit("piano crown", pianoMeta(socket.roomId));
+        emitPianoCrown(socket.roomId);
       }),
     );
 
@@ -2783,7 +2899,7 @@ function registerSocketHandlers() {
         if (ps.crown !== userId && !isStaff) return;
         ps.crown = null;
         ps.onlyOwner = false;
-        io().to(socket.roomId).emit("piano crown", pianoMeta(socket.roomId));
+        emitPianoCrown(socket.roomId);
       }),
     );
 
@@ -2797,7 +2913,7 @@ function registerSocketHandlers() {
         const isStaff = !!(socket.isDev || socket.isMod);
         if (ps.crown !== userId && !isStaff) return;
         ps.onlyOwner = !!(data && data.onlyOwner);
-        io().to(socket.roomId).emit("piano crown", pianoMeta(socket.roomId));
+        emitPianoCrown(socket.roomId);
       }),
     );
 
@@ -3122,9 +3238,12 @@ function registerSocketHandlers() {
         }
 
         // Semi-private rooms: session-validated codes skip the prompt.
-        // Staff bypass the code entirely (join bypass only - the codes
-        // themselves remain hidden from mods).
-        if (room.type === "semi-private" && !socket.isDev && !socket.isMod) {
+        // Devs and full (level 2) mods bypass the code entirely (join bypass
+        // only - the codes themselves stay hidden from them). Junior (level 1)
+        // mods do NOT bypass: they must enter the code like a normal user.
+        const bypassAccessCode =
+          socket.isDev || (socket.isMod && (socket.modLevel || 2) >= 2);
+        if (room.type === "semi-private" && !bypassAccessCode) {
           const validated =
             socket.handshake.session.validatedRooms?.[data.roomId];
           let code = data.accessCode;

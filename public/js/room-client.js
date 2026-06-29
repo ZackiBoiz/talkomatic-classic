@@ -1673,11 +1673,13 @@ function updateVotesUI(votes) {
       ? Object.values(currentVotes).filter((v) => v === uid).length
       : 0;
 
-    // Own row: the votes-against-me counter
+    // Own row: the votes-against-me counter. Click it to see who voted against
+    // you (the server already sends the voter->target map; we just surface it).
     if (uid === currentUserId) {
       let counter = row.querySelector(".votes-counter");
       if (!votingActive || count === 0) {
         if (counter) counter.remove();
+        closeDislikersPopover();
       } else {
         if (!counter) {
           counter = document.createElement("div");
@@ -1686,6 +1688,19 @@ function updateVotesUI(votes) {
         }
         counter.textContent = `\uD83D\uDC4E ${count}`;
         counter.style.color = "#ff6b6b";
+        counter.style.cursor = "pointer";
+        counter.title = "Click to see who disliked you";
+        counter.onclick = (e) => {
+          e.stopPropagation();
+          if (document.getElementById("dislikersPopover")) {
+            closeDislikersPopover();
+          } else {
+            showDislikersPopover(counter, dislikerNames());
+          }
+        };
+        // Keep an open popover in sync as the tally changes.
+        if (document.getElementById("dislikersPopover"))
+          showDislikersPopover(counter, dislikerNames());
       }
     }
 
@@ -1698,6 +1713,81 @@ function updateVotesUI(votes) {
       );
     }
   });
+}
+
+// ── Who disliked you ────────────────────────────────────────────────────────
+// The server already sends the full voter->target map (filtered for visibility);
+// the client just surfaces it. Resolve the people who voted against you to their
+// display names. Anyone who has since left (or is hidden from you) falls back to
+// a generic label.
+function dislikerNames() {
+  const nameById = {};
+  document.querySelectorAll(".chat-row").forEach((row) => {
+    nameById[row.dataset.userId] = row.dataset.username || "";
+  });
+  const names = [];
+  for (const [voterId, targetId] of Object.entries(currentVotes || {})) {
+    if (targetId !== currentUserId || voterId === currentUserId) continue;
+    names.push(nameById[voterId] || "Someone");
+  }
+  return names;
+}
+
+function onDislikersOutsideClick(e) {
+  const pop = document.getElementById("dislikersPopover");
+  if (!pop) return;
+  if (pop.contains(e.target) || e.target.closest(".votes-counter")) return;
+  closeDislikersPopover();
+}
+
+function closeDislikersPopover() {
+  const existing = document.getElementById("dislikersPopover");
+  if (existing) existing.remove();
+  document.removeEventListener("click", onDislikersOutsideClick, true);
+}
+
+function showDislikersPopover(anchorEl, names) {
+  closeDislikersPopover();
+  if (!anchorEl || !names.length) return;
+
+  const pop = document.createElement("div");
+  pop.id = "dislikersPopover";
+  pop.className = "votes-dropdown";
+
+  const title = document.createElement("div");
+  title.className = "votes-dropdown-title";
+  title.textContent =
+    names.length === 1
+      ? "1 person disliked you"
+      : `${names.length} people disliked you`;
+  pop.appendChild(title);
+
+  names.forEach((n) => {
+    const item = document.createElement("div");
+    item.className = "votes-dropdown-item";
+    item.textContent = n;
+    pop.appendChild(item);
+  });
+
+  // Fixed position next to the counter so the room layout's overflow can't clip
+  // it, and so it stays put if rows reflow underneath.
+  document.body.appendChild(pop);
+  const r = anchorEl.getBoundingClientRect();
+  const pw = pop.offsetWidth;
+  const ph = pop.offsetHeight;
+  let top = r.bottom + 4;
+  if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 4);
+  let left = r.left;
+  if (left + pw > window.innerWidth - 8)
+    left = Math.max(8, window.innerWidth - pw - 8);
+  pop.style.top = top + "px";
+  pop.style.left = left + "px";
+
+  // Defer so the opening click doesn't immediately count as an outside click.
+  setTimeout(
+    () => document.addEventListener("click", onDislikersOutsideClick, true),
+    0,
+  );
 }
 
 function adjustVoteButtonVisibility() {
@@ -2381,6 +2471,7 @@ function createUserRow(user, container) {
   row.classList.add("chat-row");
   if (user.id === currentUserId) row.classList.add("current-user");
   row.dataset.userId = user.id;
+  row.dataset.username = user.username || "";
 
   if (user.isDev && !user.isHidden) {
     row.classList.add("dev-user");
@@ -2594,11 +2685,21 @@ function createUserRow(user, container) {
 function updateRoomUI(roomData) {
   const container = document.querySelector(".chat-container");
   if (!container) return;
-  while (container.firstChild) container.removeChild(container.firstChild);
   chatInput = null;
+  // Build every row off-DOM, then swap them in as one operation. Appending rows
+  // one at a time into the live container makes slower/older devices paint the
+  // half-built room (and reflow per row), which reads as a join/spectate
+  // flicker. A single fragment swap removes that intermediate state.
+  const frag = document.createDocumentFragment();
   if (roomData.users && Array.isArray(roomData.users)) {
-    roomData.users.forEach((u) => createUserRow(u, container));
+    roomData.users.forEach((u) => createUserRow(u, frag));
   }
+  while (container.firstChild) container.removeChild(container.firstChild);
+  container.appendChild(frag);
+  // createUserRow's own visibility passes ran against the off-DOM fragment, so
+  // re-run them now that the rows are live.
+  adjustVoteButtonVisibility();
+  adjustMuteButtonVisibility();
   adjustLayout();
   if (chatInput)
     setTimeout(() => {
@@ -2663,6 +2764,10 @@ function injectStyles() {
     .votes-counter { display:inline-block; margin-left:10px; padding:2px 6px; background:#333; border-radius:4px; font-size:14px; transition:color 0.3s ease; }
     .vote-button { cursor:pointer; transition:background-color 0.2s ease; }
     .vote-button.voted { background-color:#5c3d3d !important; color:#ff9090 !important; }
+    .votes-dropdown { position:fixed; z-index:100001; min-width:160px; max-width:240px; max-height:220px; overflow-y:auto; background:#000; border:1px solid #616161; border-radius:8px; padding:6px; box-shadow:0 6px 18px rgba(0,0,0,0.5); font-family:talkoSS, Arial, sans-serif; }
+    .votes-dropdown-title { color:#ff9800; font-size:12px; padding:2px 6px 6px; border-bottom:1px solid #333; margin-bottom:4px; }
+    .votes-dropdown-item { color:#fff; font-size:13px; padding:4px 6px; border-radius:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .votes-dropdown-item:hover { background:#333; }
     .emotes-button { padding:5px 10px; background:#444; color:white; border:none; border-radius:4px; cursor:pointer; }
     .emotes-dropdown { background:#333; border:1px solid #555; border-radius:4px; padding:8px; max-width:320px; max-height:340px; overflow:hidden; display:flex; flex-direction:column; gap:8px; }
     .emotes-dropdown-header { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:2px 4px 6px; border-bottom:1px solid #555; color:#eee; }
@@ -4326,8 +4431,14 @@ function renderSpectate(data) {
   if (rid) rid.textContent = data.roomId ? "Room ID: " + data.roomId : "*";
   const c = document.querySelector(".chat-container");
   if (c) {
+    // Same atomic swap as updateRoomUI so spectating an active room doesn't
+    // flash a half-built user list on slower devices.
+    const frag = document.createDocumentFragment();
+    (data.users || []).forEach((u) => createUserRow(u, frag));
     c.innerHTML = "";
-    (data.users || []).forEach((u) => createUserRow(u, c));
+    c.appendChild(frag);
+    adjustVoteButtonVisibility();
+    adjustMuteButtonVisibility();
   }
   adjustLayout();
   if (data.currentMessages) updateCurrentMessages(data.currentMessages);

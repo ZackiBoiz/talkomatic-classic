@@ -118,6 +118,10 @@ class Piano {
     this.mutedSet = new Set();
     this.selfMuted = false;
     this.participants = new Map();
+    // Client-side, per-viewer mute: silences another player's notes for you
+    // only. Separate from staff mute (mutedSet), never leaves this tab, and is
+    // available to everyone.
+    this.localMuted = new Set();
 
     // ── Chat ────────────────────────────────────────────────────────────
     this.chatNodes = [];
@@ -502,6 +506,9 @@ class Piano {
       // of vanishing.
       this.lightKey(idx, true, owner);
       this.bouncePlayer(owner);
+      // Locally muted by this viewer: keep them visible (key + bounce) but play
+      // no sound, and don't spend the audio budget on them.
+      if (this.localMuted.has(owner)) continue;
       // Throttle only the expensive audio - under a flood (bot / black-MIDI)
       // stop sounding extra note-ons so audio work can't pile up and lag the room.
       if (++this._renderWin.n > this.MAX_RENDER_NOTES_PER_SEC) continue;
@@ -737,9 +744,12 @@ class Piano {
     this.sustainBtn.addEventListener("click", () => this.showHint("Tip: hold Space for sustain"));
     bar.appendChild(this.sustainBtn);
 
-    // Crown (room mode only)
+    // Crown (room mode only). Only staff can claim/hold it, so the button is
+    // hidden for everyone else - they still SEE who holds the crown via the
+    // label and the people list.
     this.crownWrap = this.el("div", "mpp-tgroup mpp-crown-wrap");
     this.crownBtn = this.btn("mpp-tbtn", "crown", "Claim", "Room crown");
+    this.crownBtn.style.display = this.isStaff ? "" : "none";
     this.crownBtn.addEventListener("click", () => this.onCrownButton());
     this.lockBtn = this.btn("mpp-tbtn mpp-lock", "lock-open", null, "Only the crown holder can play");
     this.lockBtn.addEventListener("click", () => this.toggleLock());
@@ -1188,6 +1198,11 @@ class Piano {
   // ═══════════════════════════════════════════════════════════════════════
 
   onCrownButton() {
+    // Only staff may hold the crown; the server enforces this too.
+    if (!this.isStaff) {
+      this.showHint("Only staff can hold the crown");
+      return;
+    }
     const mine = this.crown && this.crown === this.userId;
     if (mine) this.socket.emit("piano crown drop");
     else this.socket.emit("piano crown claim");
@@ -1215,7 +1230,7 @@ class Piano {
     this.crownBtn.classList.toggle("mpp-has-crown", !!mine);
 
     if (!this.crown) {
-      this.crownBtn.style.display = "";
+      this.crownBtn.style.display = this.isStaff ? "" : "none";
       this.lockBtn.style.display = "none";
       this.crownLabel.textContent = "";
     } else if (mine) {
@@ -1279,6 +1294,19 @@ class Piano {
     this.socket.emit("piano mute user", { targetUserId: uid, mute });
   }
 
+  // Local mute: silence one player for this viewer only. Nothing is sent to the
+  // server, so it works for everyone and is independent of staff mute.
+  toggleLocalMute(uid) {
+    if (!uid || uid === this.userId) return;
+    if (this.localMuted.has(uid)) {
+      this.localMuted.delete(uid);
+    } else {
+      this.localMuted.add(uid);
+      this.dropUserVoices(uid); // cut anything of theirs ringing right now
+    }
+    this.renderParticipants();
+  }
+
   renderParticipants() {
     if (!this.peopleList) return;
     this.peopleList.textContent = "";
@@ -1310,10 +1338,20 @@ class Piano {
         m.title = "Muted";
         row.appendChild(m);
       }
+      // Per-viewer local mute (everyone gets this; it never leaves your tab).
+      if (!r.self) {
+        const lm = this.localMuted.has(r.userId);
+        const b = this.btn("mpp-person-btn mpp-local-mute" + (lm ? " on" : ""),
+          lm ? "ear-deaf" : "ear-listen", null,
+          lm ? "Muted for you - click to hear" : "Mute for you only");
+        b.addEventListener("click", (e) => { e.stopPropagation(); this.toggleLocalMute(r.userId); });
+        row.appendChild(b);
+      }
+      // Staff-only room mute (silences the player for everyone, server-side).
       if (this.isStaff && !r.self) {
         const muted = this.mutedSet.has(r.userId);
         const b = this.btn("mpp-person-btn" + (muted ? " on" : ""),
-          muted ? "volume-high" : "volume-xmark", null, muted ? "Unmute" : "Mute");
+          muted ? "volume-high" : "volume-xmark", null, muted ? "Unmute (room)" : "Mute (room)");
         b.addEventListener("click", (e) => { e.stopPropagation(); this.muteUser(r.userId, !muted); });
         row.appendChild(b);
       }

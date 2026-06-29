@@ -54,13 +54,44 @@ function broadcast(entry) {
   }
 }
 
+// All disk writes share one chain so an append and a compaction can never
+// interleave and drop or duplicate a line.
+let writeChain = Promise.resolve();
+let appendsSinceCompact = 0;
+const COMPACT_EVERY = 500; // rewrite the file from the ring after this many appends
+
+function enqueueWrite(fn) {
+  writeChain = writeChain
+    .then(fn)
+    .catch((e) => console.error("audit io failed:", e));
+  return writeChain;
+}
+
+// Mirror one entry to disk, then periodically compact. The file is append-only,
+// but load() only ever reads back the last MAX_ENTRIES lines - everything older
+// is dead weight that still has to be read into memory at every boot. So after a
+// batch of appends we rewrite the file from the in-memory ring (already capped
+// to MAX_ENTRIES), keeping the live history and nothing more. New events push
+// old ones out; disk use and boot-time memory stay bounded with no change to
+// what the dashboard ever sees.
+function persist(entry) {
+  enqueueWrite(async () => {
+    await fsp.appendFile(AUDIT_PATH, JSON.stringify(entry) + "\n");
+    if (++appendsSinceCompact >= COMPACT_EVERY) {
+      appendsSinceCompact = 0;
+      const body = entries.map((e) => JSON.stringify(e)).join("\n");
+      const tmp = AUDIT_PATH + ".tmp";
+      await fsp.writeFile(tmp, body ? body + "\n" : "");
+      await fsp.rename(tmp, AUDIT_PATH);
+    }
+  });
+}
+
 function push(entry) {
   entry.id = ++seq;
   entries.push(entry);
   if (entries.length > MAX_ENTRIES) entries.shift();
-  fsp
-    .appendFile(AUDIT_PATH, JSON.stringify(entry) + "\n")
-    .catch((e) => console.error("audit append failed:", e));
+  persist(entry);
   broadcast(entry);
   return entry;
 }
