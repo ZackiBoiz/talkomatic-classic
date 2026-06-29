@@ -881,6 +881,9 @@ function sendAppsList(s) {
       ip: isDev ? a.ip : undefined,
     })),
   );
+  // Bundle the open/closed switch with every list so the dashboard toggle always
+  // reflects the live state.
+  s.emit("applications state", { open: !!state.applicationsOpen });
 }
 
 // Push the updated application list to every reviewer (full mods + devs).
@@ -888,6 +891,14 @@ function broadcastAppsList() {
   if (!io()) return;
   for (const [, s] of io().sockets.sockets)
     if (s.isDev || (s.isMod && (s.modLevel || 2) >= 2)) sendAppsList(s);
+}
+
+// Push just the open/closed switch to every reviewer (after a dev toggles it).
+function broadcastApplicationsState() {
+  if (!io()) return;
+  for (const [, s] of io().sockets.sockets)
+    if (s.isDev || (s.isMod && (s.modLevel || 2) >= 2))
+      s.emit("applications state", { open: !!state.applicationsOpen });
 }
 
 // Push the reports board to every open dashboard (full mods + devs) so new
@@ -959,7 +970,9 @@ function handleInviteCredit(socket) {
   const inviterId = res.inviterDeviceId;
   const inviterName = (identity.getRecord(inviterId) || {}).name || "A member";
   if (res.newCount === invites.MILESTONE_MOD) {
-    if (!applications.pendingForDevice(inviterId)) {
+    // Respect the dev kill switch: no new applications (auto-filed or not) while
+    // the intake is closed.
+    if (state.applicationsOpen && !applications.pendingForDevice(inviterId)) {
       applications.submit({
         deviceId: inviterId,
         ip: null,
@@ -1158,18 +1171,27 @@ function formatUserForSocket(user, recipientSocket) {
   const inviteRank = invites.rankBadge(user.deviceId);
   if (inviteRank) formatted.inviteRank = inviteRank;
 
-  if (user.isHidden) {
+  // Hidden staff render as plain users to everyone EXCEPT a dev recipient: a
+  // dev always needs to know who is staff, so a hidden (or vanished) dev/mod
+  // keeps their role when seen by a dev, with isHidden/isVanished markers so the
+  // dev can tell they are concealed from normal users.
+  const recipientIsDev = !!recipientSocket?.isDev;
+  if (user.isHidden && !recipientIsDev) {
     return formatted;
   }
 
   if (user.isDev) {
     formatted.isDev = true;
-    if (user.devColor) formatted.devColor = user.devColor;
+    // Keep the loud color off the concealed view - the crown + marker is enough
+    // for a dev to identify them without making them look fully public.
+    if (user.devColor && !user.isHidden) formatted.devColor = user.devColor;
     if (user.isVanished) formatted.isVanished = true;
+    if (user.isHidden) formatted.isHidden = true;
   } else if (user.isMod) {
     // Mod badge is distinct from the dev crown; mods are never vanished.
     formatted.isMod = true;
     formatted.modLevel = user.modLevel || 2;
+    if (user.isHidden) formatted.isHidden = true;
   }
 
   return formatted;
@@ -5278,6 +5300,11 @@ function registerSocketHandlers() {
             ok: false,
             error: "You're already staff.",
           });
+        if (!state.applicationsOpen)
+          return socket.emit("mod application result", {
+            ok: false,
+            error: "Moderator applications are closed right now. Please check back later.",
+          });
         if (!identity.isActive(socket.deviceId))
           return socket.emit("mod application result", {
             ok: false,
@@ -5318,6 +5345,28 @@ function registerSocketHandlers() {
       safe(async () => {
         if (!requireModLevel(socket, 2)) return;
         sendAppsList(socket);
+      }),
+    );
+
+    // Dev-only: open or close the moderator-application intake. Closing it does
+    // not touch existing applications; it only stops new ones being accepted.
+    socket.on(
+      "dev set applications open",
+      safe(async (data) => {
+        if (!requireDev(socket)) return;
+        state.applicationsOpen = !!(data && data.open);
+        logStaff(
+          socket,
+          state.applicationsOpen ? "open applications" : "close applications",
+          "-",
+          "-",
+        );
+        broadcastApplicationsState();
+        socket.emit("staff action result", {
+          action: "applications open",
+          ok: true,
+          open: state.applicationsOpen,
+        });
       }),
     );
 

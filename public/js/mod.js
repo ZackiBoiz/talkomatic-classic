@@ -44,6 +44,7 @@
   let appsPage = 0;
   let appsFilter = "pending"; // pending | approved | rejected | all
   let appsQuery = "";
+  let applicationsOpen = true; // dev kill switch for new mod applications
   const APPS_PAGE = 8;
   let reportsList = [];
   let appealsList = []; // ban appeals (Appeals tab)
@@ -2076,15 +2077,33 @@
     return card;
   }
 
+  // Dev-only Close/Open button for the application intake. Mods see only the
+  // closed state reflected in the sub-line.
+  function renderApplicationsToggle() {
+    const btn = $("appsToggle");
+    if (!btn) return;
+    const isDev = me && me.role === "dev";
+    btn.style.display = isDev ? "" : "none";
+    if (!isDev) return;
+    btn.innerHTML = applicationsOpen
+      ? '<i class="fas fa-lock"></i> Close applications'
+      : '<i class="fas fa-lock-open"></i> Open applications';
+    btn.classList.toggle("danger", applicationsOpen);
+    btn.title = applicationsOpen
+      ? "Stop accepting new moderator applications"
+      : "Resume accepting new moderator applications";
+  }
+
   function renderApps() {
     const wrap = $("appsList");
     if (!wrap) return;
+    renderApplicationsToggle();
     wrap.textContent = "";
     const pending = applicationsList.filter((a) => a.status === "pending");
     const badge = $("appsBadge");
     if (badge) badge.textContent = String(pending.length);
     const sub = $("appsSub");
-    if (sub)
+    if (sub) {
       sub.textContent = pending.length
         ? pending.length +
           " awaiting review" +
@@ -2096,6 +2115,8 @@
             applicationsList.length +
             " total"
           : "No applications yet";
+      if (!applicationsOpen) sub.textContent += "  ·  CLOSED to new applications";
+    }
 
     if (applicationsList.length === 0) {
       wrap.appendChild(emptyBox("fa-user-pen", "No applications yet."));
@@ -2301,6 +2322,7 @@
       switchTab("activity");
     if (!fullMod && tab === "bans") switchTab("activity");
     if (!fullMod && tab === "applications") switchTab("activity");
+    renderApplicationsToggle();
     if (!fullMod && tab === "reports") switchTab("activity");
     if (!fullMod && tab === "invites") switchTab("activity");
     if (!fullMod && feedFilter === "notification") {
@@ -2401,6 +2423,12 @@
 
   socket.on("mod applications", (list) => {
     applicationsList = Array.isArray(list) ? list : [];
+    renderApps();
+  });
+
+  socket.on("applications state", (d) => {
+    applicationsOpen = !d || d.open !== false;
+    renderApplicationsToggle();
     renderApps();
   });
 
@@ -2573,6 +2601,10 @@
   $("appsRefresh") &&
     $("appsRefresh").addEventListener("click", () =>
       socket.emit("mod applications list"),
+    );
+  $("appsToggle") &&
+    $("appsToggle").addEventListener("click", () =>
+      socket.emit("dev set applications open", { open: !applicationsOpen }),
     );
   $("reportsRefresh") &&
     $("reportsRefresh").addEventListener("click", () =>

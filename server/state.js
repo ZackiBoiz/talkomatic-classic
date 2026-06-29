@@ -208,6 +208,7 @@ const state = {
   // Staff runtime toggles (in-memory; reset on restart by design)
   maintenance: false, // blocks new room creation and joins for non-staff
   lobbyTicker: "", // editable banner shown at the top of the lobby
+  applicationsOpen: true, // when false, new mod applications are not accepted
 
   // Caches
   normalizeCache: new Map(),

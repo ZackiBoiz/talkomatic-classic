@@ -2234,17 +2234,27 @@ function applyDevAppearanceToRow(row, user) {
   const ci = row.querySelector(".chat-input");
   if (!info || !ci) return;
 
+  // A dev viewer sees concealed staff (hidden/vanished) with their badge, but
+  // never the loud flair, plus a marker. Other viewers behave as before.
+  const devSeesConcealed = currentUserIsDev && user.id !== currentUserId;
   const crown = info.querySelector(".dev-crown");
-  const showDevFlair = !!user.isDev && !user.isHidden;
+  const loudDev = !!user.isDev && !user.isHidden;
+  const showCrown = !!user.isDev && (!user.isHidden || devSeesConcealed);
 
-  if (showDevFlair) {
+  if (loudDev) {
     row.classList.add("dev-user");
     ci.classList.add("dev-fire-text");
 
     if (user.devColor) {
       ci.style.setProperty("color", user.devColor, "important");
     }
+  } else {
+    row.classList.remove("dev-user");
+    ci.classList.remove("dev-fire-text");
+    ci.style.removeProperty("color");
+  }
 
+  if (showCrown) {
     if (!crown) {
       const crownImg = document.createElement("img");
       crownImg.src = "images/icons/crown.gif";
@@ -2252,16 +2262,14 @@ function applyDevAppearanceToRow(row, user) {
       crownImg.className = "dev-crown";
       info.insertBefore(crownImg, info.firstChild);
     }
-  } else {
-    row.classList.remove("dev-user");
-    ci.classList.remove("dev-fire-text");
-    ci.style.removeProperty("color");
-    if (crown) crown.remove();
+  } else if (crown) {
+    crown.remove();
   }
 
   // Mod badge (distinct from the dev crown), toggled by hide state
   const modBadge = info.querySelector(".mod-badge");
-  const showModFlair = !!user.isMod && !user.isDev && !user.isHidden;
+  const showModFlair =
+    !!user.isMod && !user.isDev && (!user.isHidden || devSeesConcealed);
   const wantLevel = user.modLevel || 2;
   if (showModFlair) {
     if (!modBadge)
@@ -2270,6 +2278,21 @@ function applyDevAppearanceToRow(row, user) {
       modBadge.replaceWith(createModBadge(wantLevel));
   } else if (modBadge) {
     modBadge.remove();
+  }
+
+  // Dev-only marker showing this staffer is hidden/vanished from normal users.
+  const marker = info.querySelector(".staff-concealed-marker");
+  const showMarker =
+    devSeesConcealed &&
+    (user.isDev || user.isMod) &&
+    (user.isHidden || user.isVanished);
+  if (showMarker) {
+    const fresh = makeStaffConcealedMarker(user);
+    if (!marker) info.appendChild(fresh);
+    else if (marker.dataset.state !== fresh.dataset.state)
+      marker.replaceWith(fresh);
+  } else if (marker) {
+    marker.remove();
   }
 }
 
@@ -2489,6 +2512,11 @@ function createUserRow(user, container) {
   row.dataset.userId = user.id;
   row.dataset.username = user.username || "";
 
+  // A dev viewer always gets to see who is staff, even staff who are hidden or
+  // vanished from normal users (the server only sends those flags to devs). The
+  // loud row styling stays off for concealed staff - just the badge + a marker.
+  const devSeesConcealed = currentUserIsDev && user.id !== currentUserId;
+
   if (user.isDev && !user.isHidden) {
     row.classList.add("dev-user");
   }
@@ -2501,7 +2529,7 @@ function createUserRow(user, container) {
   const rowTrophy = trophyImgFor(user.inviteRank);
   if (rowTrophy) info.appendChild(rowTrophy);
 
-  if (user.isDev && !user.isHidden) {
+  if (user.isDev && (!user.isHidden || devSeesConcealed)) {
     const crown = document.createElement("img");
     crown.src = "images/icons/crown.gif";
     crown.alt = "Dev";
@@ -2509,8 +2537,13 @@ function createUserRow(user, container) {
     info.appendChild(crown);
   }
 
-  if (user.isMod && !user.isDev && !user.isHidden) {
+  if (user.isMod && !user.isDev && (!user.isHidden || devSeesConcealed)) {
     info.appendChild(createModBadge(user.modLevel));
+  }
+
+  // Dev-only marker telling the dev this staffer is hidden/vanished to others.
+  if (devSeesConcealed && (user.isDev || user.isMod) && (user.isHidden || user.isVanished)) {
+    info.appendChild(makeStaffConcealedMarker(user));
   }
 
   const nameEl = document.createElement("span");
@@ -3650,6 +3683,23 @@ function createModBadge(level) {
   badge.title = lvl === 1 ? "Junior moderator (level 1)" : "Moderator";
   badge.dataset.level = String(lvl);
   return badge;
+}
+
+// Small dev-only marker shown next to a staffer who is hidden or vanished from
+// normal users. The server sends the isHidden/isVanished flags only to devs, so
+// this never reaches a regular viewer.
+function makeStaffConcealedMarker(user) {
+  const span = document.createElement("span");
+  span.className = "staff-concealed-marker";
+  const states = [];
+  if (user.isVanished) states.push("vanished");
+  if (user.isHidden) states.push("hidden");
+  span.dataset.state = states.join("+");
+  span.title = "Staff " + states.join(" + ") + " (visible to devs only)";
+  const icon = document.createElement("i");
+  icon.className = user.isVanished ? "fas fa-ghost" : "fas fa-eye-slash";
+  span.appendChild(icon);
+  return span;
 }
 
 // Report a user to staff. Available to normal users (staff act via the gear).
