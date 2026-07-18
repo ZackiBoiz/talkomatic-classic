@@ -179,8 +179,8 @@ loadAnniversary();
 // ── Talkoboard: Server-Side Stroke Storage (ephemeral) ──────────────────────
 
 const boardState = new Map(); // roomId → { strokes: [], active: Map<userId, stroke> }
-const MAX_BOARD_STROKES = 500;
-const MAX_POINTS_PER_STROKE = 10000;
+const MAX_BOARD_STROKES = 2000;
+const MAX_POINTS_PER_STROKE = 5000;
 
 function getBoardState(roomId) {
   if (!boardState.has(roomId)) {
