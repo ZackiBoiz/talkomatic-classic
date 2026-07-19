@@ -474,27 +474,38 @@ let currentEmoteInfo = null;
 let useOverlayEmotes = false;
 
 async function loadEmotes() {
+  const BASE =
+    "https://raw.githubusercontent.com/ZackiBoiz/Multiplayer-Piano-Optimizations/refs/heads/main/emotes";
   try {
-    const resp = await fetch(`https://raw.githubusercontent.com/ZackiBoiz/Multiplayer-Piano-Optimizations/refs/heads/main/emotes/meta.jsonc?_=${Date.now()}`);
+    // referrerPolicy: no-referrer silences the cross-site referrer warning and
+    // sends nothing about our origin. signal: a hard timeout so a slow/hung
+    // GitHub never stalls the caller (this runs during room init).
+    const resp = await fetch(`${BASE}/meta.jsonc?_=${Date.now()}`, {
+      referrerPolicy: "no-referrer",
+      signal: AbortSignal.timeout(8000),
+    });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const pairs = parseJSONC(await resp.text());
     const validCode = /^[A-Za-z0-9_.-]+$/;
     const validExt = /^(?:png|gif|webp|jpe?g|avif|heif|tiff|bmp|svg)$/i;
-    emoteList = Object.fromEntries(
+    const next = Object.fromEntries(
       Object.entries(pairs)
         .filter(([name, ext]) =>
           validCode.test(name) &&
           typeof ext === "string" &&
           validExt.test(ext)
         )
-        .map(([name, ext]) => [name,
-          `https://raw.githubusercontent.com/ZackiBoiz/Multiplayer-Piano-Optimizations/refs/heads/main/emotes/assets/${name}.${ext}`,
-        ]),
+        .map(([name, ext]) => [name, `${BASE}/assets/${name}.${ext}`]),
     );
+    // Only swap in a non-empty set, so a valid-but-empty response can't blank
+    // emotes either.
+    if (Object.keys(next).length) emoteList = next;
     console.log("Emotes loaded:", Object.keys(emoteList).length);
   } catch (err) {
+    // A transient failure (GitHub blip, timeout, rate-limit, offline) must NOT
+    // wipe emotes we already have - keep the last good set instead of dropping
+    // every emote to plain text.
     console.error("Error loading emotes:", err);
-    emoteList = {};
   }
 }
 
@@ -642,6 +653,7 @@ function removeTrailingCommas(input) {
 
 function createEmoteNode(emoteCode, isOverlay = false) {
   const img = document.createElement("img");
+  img.referrerPolicy = "no-referrer";
   img.src = emoteList[emoteCode];
   img.alt = isOverlay ? `;${emoteCode};` : `:${emoteCode}:`;
   img.title = img.alt;
@@ -931,6 +943,7 @@ function showAutocomplete(prefix) {
       "emote-autocomplete-item" + (i === selectedEmoteIndex ? " selected" : "");
 
     const img = document.createElement("img");
+    img.referrerPolicy = "no-referrer";
     img.src = EMOTE_IMAGE_PLACEHOLDER;
     img.dataset.src = emoteList[match.code];
     img.alt = `:${match.code}:`;
@@ -1162,7 +1175,7 @@ function insertEmote(emoteCode, emoteInfo, options = {}) {
       document.execCommand("insertText", false, tokenText);
       replaceEmotes(chatInput);
     } else {
-      const html = `<img src="${emoteList[emoteCode]}" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`;
+      const html = `<img src="${emoteList[emoteCode]}" referrerpolicy="no-referrer" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`;
       document.execCommand("insertHTML", false, html);
     }
   } catch {
@@ -1172,7 +1185,7 @@ function insertEmote(emoteCode, emoteInfo, options = {}) {
         false,
         useOverlayToken
           ? tokenText
-          : `<img src="${emoteList[emoteCode]}" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`,
+          : `<img src="${emoteList[emoteCode]}" referrerpolicy="no-referrer" alt=":${emoteCode}:" title=":${emoteCode}:" class="emote" data-emote-code="${emoteCode}">`,
       );
       if (useOverlayToken) replaceEmotes(chatInput);
     } catch { }
@@ -1398,6 +1411,7 @@ function createEmotesDropdown() {
     const item = document.createElement("div");
     item.className = "emote-item";
     const img = document.createElement("img");
+    img.referrerPolicy = "no-referrer";
     img.src = EMOTE_IMAGE_PLACEHOLDER;
     img.dataset.src = url;
     img.alt = `:${code}:`;
@@ -2735,14 +2749,41 @@ function updateRoomUI(roomData) {
   const container = document.querySelector(".chat-container");
   if (!container) return;
   chatInput = null;
+
+  // Defensive self-row guard. If a server-side race dropped our own membership
+  // from this frame's user list, render our editable row anyway from what we
+  // already know about ourselves - otherwise a self-less "room joined" leaves
+  // the user with no textbox until a manual refresh. Mirrors the self-row
+  // protection the "room update" handler already applies. Never for spectators
+  // (read-only, no own row).
+  let users =
+    roomData.users && Array.isArray(roomData.users) ? roomData.users : [];
+  if (
+    !isSpectating &&
+    currentUserId &&
+    !users.some((u) => u.id === currentUserId)
+  ) {
+    users = [
+      {
+        id: currentUserId,
+        username: currentUsername,
+        location: currentLocation,
+        isDev: currentUserIsDev,
+        isMod: currentUserIsMod,
+        modLevel: currentUserModLevel,
+        isHidden: currentUserIsHidden,
+        isVanished: currentUserIsVanished,
+      },
+      ...users,
+    ];
+  }
+
   // Build every row off-DOM, then swap them in as one operation. Appending rows
   // one at a time into the live container makes slower/older devices paint the
   // half-built room (and reflow per row), which reads as a join/spectate
   // flicker. A single fragment swap removes that intermediate state.
   const frag = document.createDocumentFragment();
-  if (roomData.users && Array.isArray(roomData.users)) {
-    roomData.users.forEach((u) => createUserRow(u, frag));
-  }
+  users.forEach((u) => createUserRow(u, frag));
   while (container.firstChild) container.removeChild(container.firstChild);
   container.appendChild(frag);
   // createUserRow's own visibility passes ran against the off-DOM fragment, so
@@ -3487,7 +3528,11 @@ function readAndScrubUrlParams() {
 
 async function initRoom() {
   const filter = new ClientWordFilter();
-  await Promise.all([loadEmotes(), filter.init()]);
+  // Emotes come from an external host - kick off the load but never block (or
+  // delay) entering the room on it; it populates emoteList in the background.
+  // The word filter is same-origin and fast, so we still await it before joining.
+  loadEmotes();
+  await filter.init();
   if (filter.ready) clientWordFilter = filter;
   else console.warn("[WordFilter] Not available.");
 
@@ -4011,27 +4056,35 @@ function openIpBlockPicker(user) {
           label: d.label,
           danger: true,
           onClick: async () => {
-            const reason = await StaffUI.prompt({
+            const res = await StaffUI.prompt({
               title: "Block IP",
               icon: '<i class="fas fa-ban"></i>',
               message: `Block this user's IP for ${d.label}? They'll be disconnected immediately.`,
               fields: [
                 {
-                  name: "value",
+                  name: "reason",
                   label: "Message to show the blocked user (optional)",
                   type: "textarea",
                   placeholder: "e.g. Repeated harassment after warnings.",
                   maxLength: 500,
                 },
+                {
+                  name: "banRange",
+                  type: "checkbox",
+                  label: "Also block their IPv6 range (/64)",
+                  value: true,
+                  help: "Stops evasion when someone rotates their IPv6 address. Has no effect on IPv4 users (they stay a single-IP block).",
+                },
               ],
               danger: true,
               confirmText: "Block IP",
             });
-            if (reason != null)
+            if (res != null)
               socket.emit("staff ip block", {
                 targetUserId: user.id,
                 duration: d.value,
-                reason,
+                reason: res.reason || "",
+                banRange: !!res.banRange,
               });
           },
         })),
@@ -4640,10 +4693,14 @@ socket.on("maintenance status", (data) => {
 socket.on("staff action result", (data) => {
   if (!data) return;
   if (data.action === "room size" && data.size) currentRoomMaxSize = data.size;
-  notify(
-    (data.ok ? "Done: " : "Failed: ") + data.action,
-    data.ok ? "success" : "error",
-  );
+  let msg = (data.ok ? "Done: " : "Failed: ") + data.action;
+  // Confirm the IP-block scope so staff know whether the /64 range was applied
+  // (only lands for IPv6 targets) without ever revealing the address.
+  if (data.ok && data.action === "ip block")
+    msg = data.rangeApplied
+      ? "Done: IP block (blocked their IPv6 /64 range)"
+      : "Done: IP block (single address)";
+  notify(msg, data.ok ? "success" : "error");
 });
 socket.on("staff revoked", () => {
   localStorage.removeItem("talkomatic_modKey");

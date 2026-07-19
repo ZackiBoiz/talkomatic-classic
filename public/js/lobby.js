@@ -280,7 +280,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await initDB();
   const saved = await getCurrentTheme();
-  if (saved && saved.content) {
+  // Migration: the World Cup 2026 theme was retired and its files removed. Users
+  // who had it selected have its CSS stored locally (which also points at the
+  // now-deleted worldcup.png background). Reset them to the default theme so no
+  // stale event styling or broken background image lingers.
+  const isRetiredWcTheme =
+    saved &&
+    ((saved.name && /world\s*cup/i.test(saved.name)) ||
+      (saved.content && /world cup 2026/i.test(saved.content)));
+  if (isRetiredWcTheme) {
+    try {
+      const db = await dbPromise;
+      await db.delete("settings", "currentTheme");
+    } catch (_) {}
+  } else if (saved && saved.content) {
     const styleEl = document.createElement("style");
     (document.head || document.getElementsByTagName("head")[0]).appendChild(
       styleEl,

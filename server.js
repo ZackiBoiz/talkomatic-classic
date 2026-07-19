@@ -44,6 +44,7 @@ const {
 const rooms = require("./server/rooms");
 const roles = require("./server/roles");
 const appeals = require("./server/appeals");
+const ipban = require("./server/ipban");
 
 // ── Global Error Handlers ───────────────────────────────────────────────────
 
@@ -215,7 +216,14 @@ app.use(
       return (
         /\.(js|css|png|jpg|jpeg|gif|ico|svg|ttf|otf|woff|woff2|mp3|wav|ogg|json|map)$/i.test(
           url,
-        ) || url.startsWith("/socket.io/")
+        ) ||
+        url.startsWith("/socket.io/") ||
+        // The ban screen polls ban-status every 20s as its ONLY channel to learn
+        // it has been unbanned (its socket stays refused while blocked). It must
+        // never eat the rate budget: if it 429s, the banned user can't detect an
+        // unban, and a 429 body used to be misread client-side as "unbanned",
+        // spawning a reload loop. Exempt this cheap read.
+        url.endsWith("/ban-status")
       );
     },
     message: {
@@ -323,26 +331,31 @@ io.use((socket, next) => {
       socket.handshake.auth.token || socket.handshake.query.token;
     const browser = detectBrowserRequest(socket.handshake);
 
-    if (state.blockedIPs.has(clientIp)) {
-      const block = state.blockedIPs.get(clientIp);
-      if (Date.now() < block.expiry) {
-        const err = new Error("IP blocked");
-        // Surfaced to the client's connect_error handler so the lobby can show
-        // a clear ban screen with a live countdown (or "permanent").
-        err.data = {
-          banned: true,
-          permanent: block.expiry >= Number.MAX_SAFE_INTEGER,
-          expiry: block.expiry,
-          reason: block.reason || null,
-          // Who placed the ban and when, so the ban screen can name the staff
-          // member. Only the staff label is exposed, never the raw IP.
-          by: block.by || null,
-          bannedAt: (block && typeof block === "object" && block.ts) || null,
-        };
-        return next(err);
-      }
-      state.blockedIPs.delete(clientIp);
+    // Blocked if the exact address is banned OR it falls inside a banned range
+    // (IPv6 /64), so rotating within a /64 does not evade the ban.
+    const activeBlock = ipban.findActiveBlock(clientIp);
+    if (activeBlock) {
+      const block = activeBlock.block;
+      const expiry = block && typeof block === "object" ? block.expiry : block;
+      const err = new Error("IP blocked");
+      // Surfaced to the client's connect_error handler so the lobby can show
+      // a clear ban screen with a live countdown (or "permanent").
+      err.data = {
+        banned: true,
+        permanent: expiry >= Number.MAX_SAFE_INTEGER,
+        expiry,
+        reason: (block && block.reason) || null,
+        // Who placed the ban and when, so the ban screen can name the staff
+        // member. Only the staff label is exposed, never the raw IP.
+        by: (block && block.by) || null,
+        bannedAt: (block && typeof block === "object" && block.ts) || null,
+      };
+      return next(err);
     }
+    // Opportunistically drop a stale exact entry so the map does not grow.
+    const stale = state.blockedIPs.get(clientIp);
+    if (stale !== undefined && !ipban.isActiveBlock(stale))
+      state.blockedIPs.delete(clientIp);
 
     // Dev mode: validate devKey by hash against the configured dev keys
     // (.env DEV_KEY_HASH supports multiple labeled keys). Owner-only.
@@ -543,14 +556,11 @@ app.get(`${API}/me`, (req, res) => {
 app.post(`${API}/appeal`, (req, res) => {
   try {
     const ip = getClientIP(req);
-    const block = state.blockedIPs.get(ip);
-    const expiry = block && typeof block === "object" ? block.expiry : block;
-    const blocked =
-      !!block &&
-      (!expiry ||
-        expiry === Number.MAX_SAFE_INTEGER ||
-        Date.now() < expiry);
-    if (!blocked) return res.json({ ok: false, code: "not_banned" });
+    // Match a range ban too, so a range-banned user (whose exact address is not
+    // itself a key) can still submit an appeal from the ban screen.
+    const active = ipban.findActiveBlock(ip);
+    if (!active) return res.json({ ok: false, code: "not_banned" });
+    const block = active.block;
 
     const message = sanitizeMessage(
       typeof req.body?.message === "string" ? req.body.message : "",
@@ -603,11 +613,13 @@ app.post(`${API}/appeal`, (req, res) => {
 // a ban is lifted, instead of stranding the user until they refresh by hand.
 app.get(`${API}/ban-status`, (req, res) => {
   const ip = getClientIP(req);
-  const block = state.blockedIPs.get(ip);
+  // Range-aware: a range-banned user must keep reading banned:true here (matches
+  // the socket gate), or the ban screen would think they were unbanned and
+  // reload-loop.
+  const active = ipban.findActiveBlock(ip);
+  const block = active ? active.block : null;
   const expiry = block && typeof block === "object" ? block.expiry : block;
-  const banned =
-    !!block &&
-    (!expiry || expiry === Number.MAX_SAFE_INTEGER || Date.now() < expiry);
+  const banned = !!active;
   res.json({
     banned,
     permanent: banned && expiry >= Number.MAX_SAFE_INTEGER,
@@ -847,28 +859,6 @@ async function start() {
 ══════════════════════════════════════════════════════`);
   });
 }
-
-// World Cup live scores proxy (60s cache, shields upstream)
-const WC_PROXY_CACHE = { data: null, ts: 0 };
-app.get(`${API}/wc/games`, async (req, res) => {
-  try {
-    if (WC_PROXY_CACHE.data && Date.now() - WC_PROXY_CACHE.ts < 60000) {
-      return res.json(WC_PROXY_CACHE.data);
-    }
-    const r = await fetch("https://worldcup26.ir/get/games", {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!r.ok) throw new Error("upstream " + r.status);
-    const data = await r.json();
-    WC_PROXY_CACHE.data = data;
-    WC_PROXY_CACHE.ts = Date.now();
-    res.json(data);
-  } catch (e) {
-    if (WC_PROXY_CACHE.data) return res.json(WC_PROXY_CACHE.data); // stale ok
-    res.status(502).json({ error: "World Cup data unavailable" });
-  }
-});
 
 // Shutdown is handled by beginShutdown() above (SIGINT/SIGTERM), which notifies
 // clients, force-saves rooms, flushes the other stores, then exits.

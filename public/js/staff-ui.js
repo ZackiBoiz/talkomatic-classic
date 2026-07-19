@@ -51,6 +51,9 @@
   .tk-textarea{min-height:84px;resize:vertical;line-height:1.5;}
   .tk-input:focus,.tk-textarea:focus,.tk-select:focus{border-color:#ff9800;}
   .tk-help{font-size:11.5px;color:#8d8d8d;margin:6px 0 0;word-break:break-word;}
+  .tk-checkbox-row{display:flex;align-items:center;gap:9px;cursor:pointer;
+    color:#fff;font-size:13.5px;user-select:none;}
+  .tk-checkbox-row input{accent-color:#ff9800;width:16px;height:16px;flex:none;margin:0;}
   .tk-err{font-size:12px;color:#ff5468;margin:6px 0 0;display:none;}
   /* menu */
   .tk-group{margin:4px 0 18px;}
@@ -403,6 +406,20 @@
       const inputs = {};
       fields.forEach((f) => {
         const wrap = el("div", { class: "tk-field" });
+        if (f.type === "checkbox") {
+          // Renders as [x] label on one row; the value is its checked state.
+          const cb = el("input", { type: "checkbox", class: "tk-checkbox" });
+          cb.checked = !!f.value;
+          const row = el("label", { class: "tk-checkbox-row" });
+          row.appendChild(cb);
+          if (f.label) row.appendChild(el("span", { text: f.label }));
+          wrap.appendChild(row);
+          inputs[f.name] = cb;
+          if (f.help)
+            wrap.appendChild(el("div", { class: "tk-help", text: f.help }));
+          form.appendChild(wrap);
+          return;
+        }
         if (f.label)
           wrap.appendChild(el("label", { class: "tk-label", text: f.label }));
         let input;
@@ -444,6 +461,10 @@
       const submit = () => {
         const values = {};
         for (const f of fields) {
+          if (f.type === "checkbox") {
+            values[f.name] = inputs[f.name].checked;
+            continue;
+          }
           const v = inputs[f.name].value;
           if (f.required && !String(v).trim()) {
             errEl.textContent = `${f.label || f.name} is required.`;

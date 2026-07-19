@@ -39,6 +39,7 @@ const reports = require("./reports");
 const appeals = require("./appeals");
 const banhistory = require("./banhistory");
 const blocklist = require("./blocklist");
+const ipban = require("./ipban");
 const crypto = require("crypto");
 
 // Per-boot secret used to give each active ban an opaque reference token. Full
@@ -146,35 +147,6 @@ function deviceTypeFromUA(ua) {
 function io() {
   return state.io;
 }
-
-// ── Anniversary: a shared, persisted "celebrations" counter ─────────────────
-// Everyone sees the live count grow as people light the candles.
-let anniversaryCount = 0;
-const ANNIVERSARY_PATH = path.join(__dirname, "..", "anniversary.json");
-let annivSavePending = false;
-function loadAnniversary() {
-  try {
-    const obj = JSON.parse(require("fs").readFileSync(ANNIVERSARY_PATH, "utf8"));
-    if (obj && typeof obj.count === "number" && obj.count >= 0)
-      anniversaryCount = Math.floor(obj.count);
-  } catch (_) { }
-}
-function saveAnniversary() {
-  if (annivSavePending) return;
-  annivSavePending = true;
-  setTimeout(() => {
-    fs.writeFile(
-      ANNIVERSARY_PATH,
-      JSON.stringify({ count: anniversaryCount }),
-      "utf8",
-    )
-      .catch(() => { })
-      .finally(() => {
-        annivSavePending = false;
-      });
-  }, 2000);
-}
-loadAnniversary();
 
 // ── Talkoboard: Server-Side Stroke Storage (ephemeral) ──────────────────────
 
@@ -747,13 +719,10 @@ function buildReportsList() {
 // board and audit feed; `stillBlocked` lets the board show whether the ban the
 // appeal contests is still in force.
 function buildAppealsList(forDev) {
-  const now = Date.now();
   return appeals.list().map((a) => {
-    const block = state.blockedIPs.get(a.ip);
-    const expiry = block && typeof block === "object" ? block.expiry : block;
-    const stillBlocked =
-      !!block &&
-      (!expiry || expiry === Number.MAX_SAFE_INTEGER || now < expiry);
+    // Range-aware: an appellant whose exact address is not itself a key may
+    // still be covered by an IPv6 /64 range ban.
+    const stillBlocked = ipban.findActiveBlock(a.ip) !== null;
     const ban = a.ban || {};
     return {
       id: a.id,
@@ -1809,6 +1778,26 @@ async function leaveRoom(socket, userId) {
 
     const room = state.rooms.get(roomId);
     if (room) {
+      // Ownership guard. leaveRoom is keyed only by userId, but during the
+      // lobby->room handoff two sockets briefly share one userId. When the old
+      // (lobby / superseded) socket disconnects it must NOT evict the membership
+      // the newer room socket just added, or that room tab loses its own row and
+      // textbox until a manual refresh. If a live successor socket already owns
+      // this room for this userId, just detach this stale socket and keep the
+      // membership intact.
+      const successor = [...io().sockets.sockets.values()].find(
+        (s) =>
+          s !== socket &&
+          s.connected &&
+          s.roomId === roomId &&
+          s.handshake?.session?.userId === userId,
+      );
+      if (successor) {
+        socket.leave(roomId);
+        socket.roomId = null;
+        return;
+      }
+
       const leftUser = room.users.find((u) => u.id === userId);
       room.users = room.users.filter((u) => u.id !== userId);
       room.lastActiveTime = Date.now();
@@ -1964,7 +1953,16 @@ function joinRoom(socket, roomId, userId) {
 
     // Staff bypass room capacity (can always enter a full room to handle a
     // report); normal users check the visible count.
-    const joinableUserCount = getJoinableUserCount(room);
+    //
+    // Exclude the joining user's OWN entry from the count. The lobby->room
+    // handoff briefly leaves a stale membership for this same userId in
+    // room.users (the lobby socket full-joins before navigating to room.html);
+    // the dedup filter just below removes it, but that runs AFTER this check.
+    // Counting the phantom self would fill the last slot and bounce an
+    // otherwise-valid join at exactly capacity-1 (e.g. 4/5 -> "room full").
+    const joinableUserCount = (room.users || []).filter(
+      (u) => u.id !== userId && !(u.isDev && u.isVanished),
+    ).length;
     if (!isStaff && joinableUserCount >= roomCapacity(room))
       return socket.emit(
         "room full",
@@ -3485,24 +3483,6 @@ function registerSocketHandlers() {
       }),
     );
 
-    // ── Anniversary celebration (public) ────────────────────────────────
-    socket.on(
-      "get anniversary",
-      safe(async () => {
-        socket.emit("anniversary count", { count: anniversaryCount });
-      }),
-    );
-    socket.on(
-      "celebrate",
-      safe(async () => {
-        if (socket.celebrated) return; // one celebration per connection
-        socket.celebrated = true;
-        anniversaryCount++;
-        saveAnniversary();
-        if (io()) io().emit("anniversary count", { count: anniversaryCount });
-      }),
-    );
-
     socket.on(
       "get room state",
       safe(async (roomId) => {
@@ -3845,7 +3825,16 @@ function registerSocketHandlers() {
           sanitizeMessage(
             typeof data?.reason === "string" ? data.reason : "",
           ).slice(0, 500) || null;
-        state.blockedIPs.set(ip, {
+
+        // Range ban (opt-in): only meaningful for a real IPv6 address, where a
+        // client rotates within its /64 to dodge a single-IP ban. computeRangeCidr
+        // returns null for IPv4 (and IPv4-mapped) addresses, so the checkbox is a
+        // harmless no-op there and the ban stays a single IP. The block is stored
+        // under the CIDR key, which covers the exact address too.
+        const cidr = data?.banRange ? ipban.computeRangeCidr(ip) : null;
+        const blockKey = cidr || ip;
+
+        state.blockedIPs.set(blockKey, {
           expiry,
           label: blockedName,
           by: socket.staffLabel || null,
@@ -3856,7 +3845,7 @@ function registerSocketHandlers() {
         // Record the ban so the history feed and repeat-offender count stay
         // accurate even after the block expires or is lifted.
         banhistory.record({
-          ip,
+          ip: blockKey,
           name: blockedName,
           action: "ban",
           by: socket.staffLabel || null,
@@ -3866,7 +3855,14 @@ function registerSocketHandlers() {
         broadcastBlockList();
         broadcastBanHistory();
 
-        for (const s of findSocketsByIp(ip)) {
+        // Disconnect every live socket the ban now covers - the exact address,
+        // or the whole range when a CIDR was placed.
+        const affected = cidr
+          ? [...io().sockets.sockets.values()].filter((s) =>
+            ipban.ipInCidr(s.clientIp, cidr),
+          )
+          : findSocketsByIp(ip);
+        for (const s of affected) {
           try {
             const uid = s.handshake?.session?.userId;
             s.emit("kicked", {
@@ -3878,7 +3874,7 @@ function registerSocketHandlers() {
         }
         logStaff(
           socket,
-          `ip block ${duration}`,
+          `ip block ${duration}${cidr ? " (range)" : ""}`,
           targetUser || { id: targetUserId },
           room || "-",
           reason || undefined,
@@ -3888,6 +3884,9 @@ function registerSocketHandlers() {
           ok: true,
           targetUserId,
           duration,
+          // Tell the mod what actually happened without leaking the address: a
+          // range ban only lands for IPv6, so this confirms it for them.
+          rangeApplied: !!cidr,
         });
       }),
     );
@@ -5135,7 +5134,11 @@ function registerSocketHandlers() {
         const reviewer = `${socket.isDev ? "dev" : "mod"}:${socket.staffLabel || ""}`;
         if (decision === "lift") {
           if (!requireDev(socket)) return; // lifting a ban is dev-only
-          const removed = state.blockedIPs.delete(a.ip);
+          // Remove the exact entry AND any covering range (e.g. an IPv6 /64):
+          // deleting only a.ip would leave a range-banned user still blocked
+          // after their appeal was "accepted".
+          const removedKeys = ipban.removeBlocksForIp(a.ip);
+          const removed = removedKeys.length > 0;
           state.botBlacklist.delete(a.ip);
           blocklist.saveSoon();
           if (removed)
