@@ -652,26 +652,18 @@ app.post(
       if (!userId || !member)
         return sendErrorResponse(res, ERROR_CODES.FORBIDDEN, "You are not in this room.", 403);
 
-      // Replacing a live puzzle is limited to whoever started it (or staff), so a
-      // passer-by can't wipe a board in progress. A new puzzle (none active) is
-      // open to anyone in the room.
       const isStaff = !!(member.isDev || member.isMod);
-      const owner = puzzle.ownerOf(roomId);
-      if (owner && owner !== userId && !isStaff)
-        return sendErrorResponse(
-          res,
-          ERROR_CODES.FORBIDDEN,
-          "Only the person who started this puzzle can replace it. Ask them to end it first.",
-          403,
-        );
+      if (!state.puzzleEnabled && !isStaff)
+        return sendErrorResponse(res, ERROR_CODES.FORBIDDEN, "Puzzles are currently turned off.", 403);
 
-      // Client-side nsfwjs must have run and passed. Reject if the attestation
-      // is missing or any unsafe class is over threshold.
+      // Client-side nsfwjs must have run and passed. Enforcement is client-side
+      // by design; the server re-checks the reported scores. Thresholds mirror
+      // the browser scan in public/puzzle.html - keep the two in sync.
       let att = null;
       try { att = JSON.parse(req.get("x-nsfw-scan") || "null"); } catch { att = null; }
       const sc = (att && att.scores) || {};
       const porn = +sc.Porn || 0, hentai = +sc.Hentai || 0, sexy = +sc.Sexy || 0;
-      if (!att || att.safe !== true || porn > 0.4 || hentai > 0.4 || sexy > 0.75)
+      if (!att || att.safe !== true || porn > 0.3 || hentai > 0.3 || sexy > 0.5 || porn + hentai + sexy > 0.6)
         return sendErrorResponse(res, ERROR_CODES.FORBIDDEN, "That image did not pass the safety check.", 403);
 
       const iw = parseInt(req.query.w, 10) | 0;
@@ -684,7 +676,16 @@ app.post(
       if (!Buffer.isBuffer(image) || image.length < 64)
         return sendErrorResponse(res, ERROR_CODES.BAD_REQUEST, "no image", 400);
 
-      puzzle.createForRoom(roomId, image, { iw, ih, target }, userId);
+      const started = puzzle.start(
+        roomId, userId, req.session?.username, image, { iw, ih }, target, isStaff,
+      );
+      if (!started.ok)
+        return sendErrorResponse(
+          res,
+          ERROR_CODES.FORBIDDEN,
+          "Someone just started a puzzle - join that one, or ask them to end it first.",
+          403,
+        );
       io.to(roomId).emit("puzzle active", { by: req.session?.username || "Someone" });
       res.json({ ok: true });
     } catch (e) {

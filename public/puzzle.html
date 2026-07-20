@@ -167,7 +167,10 @@
       <p class="text-[16px] font-medium tracking-[-.01em]">Solved</p>
       <p id="wonSub" class="num text-[11.5px] text-mid mt-1"></p>
       <div id="wonBoard" class="mt-4 flex flex-col gap-1 text-[12px]"></div>
-      <button id="wonClose" class="btn btn-s mt-4 mx-auto">Keep looking at it</button>
+      <div class="flex gap-2 mt-4 justify-center">
+        <button id="wonNext" class="btn btn-p">Start next puzzle</button>
+        <button id="wonClose" class="btn btn-s">Keep looking</button>
+      </div>
     </div>
   </div>
 
@@ -197,6 +200,18 @@
         </button>
         <p id="upErr" class="text-[11px] text-[#E5484D] mt-2 hidden"></p>
         <p class="text-[10.5px] text-mid mt-3 leading-relaxed">Images are checked for unsafe content before anyone sees them.</p>
+      </div>
+
+      <div class="float rounded-2xl p-3 mt-4">
+        <div class="flex items-center justify-between mb-2">
+          <p class="text-[11px] text-mid">In the puzzle</p>
+          <div id="landWho" class="flex items-center gap-1 flex-wrap justify-end"></div>
+        </div>
+        <div id="landLog" class="h-[110px] overflow-y-auto flex flex-col gap-1.5 text-[12px] mb-2"></div>
+        <div class="flex gap-1.5">
+          <input id="landChatIn" class="inp !py-1.5 !text-[12px]" placeholder="Chat while you pick" maxlength="200">
+          <button id="landChatSend" class="ico"><i class="fa-solid fa-paper-plane"></i></button>
+        </div>
       </div>
 
       <input id="nameIn" type="hidden">
@@ -230,7 +245,7 @@
   </div>
 </main>
 
-<script src="/js/puzzle-geometry.js"></script>
+<script src="/js/puzzle-geometry.js?v=1.0.2"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/nsfwjs@2.4.2/dist/nsfwjs.min.js"></script>
 <script type="module">
@@ -253,6 +268,7 @@ const live = (el, on) => { $(el).classList.toggle('on', on); $(el).classList.tog
 /* ══ state ═══════════════════════════════════════════════════════════════ */
 const S = {
   ws: null, me: null, room: null, L: null,
+  phase: 'choosing', owner: null, votes: null, canManage: false,
   pieces: [],                    // {idx,hx,hy,w,h,path,cv,gid}
   groups: new Map(),             // gid -> {gid,dx,dy,rx,ry,heldBy,pieces:Set,pending}
   zOrder: [], zmap: new Map(), zDirty: true,
@@ -373,8 +389,9 @@ function handle(v) {
     case OP.PLAYERS:   return onPlayers(JSON.parse(td.decode(new Uint8Array(v.buffer, 1))));
     case OP.CHATMSG:   return onChat(JSON.parse(td.decode(new Uint8Array(v.buffer, 1))));
     case OP.CELLPING:  return onCellPing(JSON.parse(td.decode(new Uint8Array(v.buffer, 1))));
-    case OP.TIDIED:    return onTidied(JSON.parse(td.decode(new Uint8Array(v.buffer, 1))));
     case OP.RESET:     return onReset(JSON.parse(td.decode(new Uint8Array(v.buffer, 1))));
+    case OP.CHOOSING:  return onChoosing();
+    case OP.VOTES:     return onVotes(JSON.parse(td.decode(new Uint8Array(v.buffer, 1))));
     case OP.SOLVED:    return onSolved(JSON.parse(td.decode(new Uint8Array(v.buffer, 1))));
     case OP.ERROR:     return onError(JSON.parse(td.decode(new Uint8Array(v.buffer, 1))));
     case OP.PING:      return;
@@ -388,24 +405,64 @@ function onError(d) {
 
 /* ══ room lifecycle ══════════════════════════════════════════════════════ */
 async function onWelcome(d) {
-  S.me = d.you; S.room = d.room;
+  S.me = d.you;
   S.canManage = !!d.you.canManage;
+  S.phase = d.phase || 'playing';
+  S.owner = d.owner || null;
+  onPlayers({ players: d.players });
+  if (d.votes) onVotes(d.votes);
+
+  // No board yet: everyone shares the choosing screen (pick a picture + chat).
+  if (S.phase === 'choosing') {
+    S.room = null;
+    clearInterval(timer);
+    show('won', false);
+    applyManage();
+    live('land', true);
+    return;
+  }
+
+  S.room = d.room;
   applyManage();
   live('land', false);
-  onPlayers({ players: d.players });
   buildLayout(d.room);
   if (d.placedBy) S.placedBy = Uint8Array.from(d.placedBy);
   clock(d.room.startedAt);
   cutSprites(d.room);
+  setOwnerLabel(S.owner);
 }
 
 function onReset(d) {
+  S.phase = 'playing';
+  S.room = S.room || {};
   Object.assign(S.room, d);
+  live('land', false);
   toast('Board re-cut');
   buildLayout(S.room);
   clock(d.startedAt);
   show('won', false);
   cutSprites(S.room);
+  setOwnerLabel(S.owner);
+  renderControls();
+}
+
+// Board ended (owner, staff, or a passed vote): drop back to the shared
+// choosing screen. Chat and the roster stay put so the room keeps talking.
+function onChoosing() {
+  S.phase = 'choosing';
+  S.room = null;
+  S.owner = null;
+  S.cut = false;
+  clearInterval(timer);
+  show('won', false);
+  live('land', true);
+  applyManage();
+  toast('Puzzle ended');
+}
+
+function onVotes(d) {
+  S.votes = d || { count: 0, need: 0, online: 0, voters: [] };
+  renderControls();
 }
 
 /* Layout + frame map come up instantly — you see what's done before your cut
@@ -504,7 +561,7 @@ async function cutSprites(r, retryDensity) {
 
   S.cut = true;
   live('busy', false);
-  $('peek').disabled = $('edges').disabled = $('tidy').disabled = false;
+  $('peek').disabled = $('edges').disabled = false;
   dirty = true;
 }
 
@@ -697,7 +754,26 @@ function onPlayers(d) {
     // Name is the Talkomatic username; not editable from inside the puzzle.
     box.appendChild(el);
   }
+  renderLandRoster(d.players);
   dirty = true;
+}
+
+// The choosing screen shows the same roster so you can see who is here before
+// a board exists.
+function renderLandRoster(players) {
+  const box = $('landWho');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const p of players) {
+    const el = document.createElement('span');
+    el.className = 'flex items-center gap-1 h-6 px-2 rounded-full text-[11px] font-medium';
+    el.style.background = p.color + (p.online ? '1F' : '10');
+    el.style.color = p.online ? p.color : 'var(--color-mid)';
+    el.title = esc(p.name) + (p.online ? ' - ' + p.placed + ' placed' : ' - away');
+    el.innerHTML = `<span class="w-1.5 h-1.5 rounded-full" style="background:${p.color};opacity:${p.online ? 1 : .4}"></span>` +
+      `<span>${esc(p.name)}</span>`;
+    box.appendChild(el);
+  }
 }
 
 function onSolved(d) {
@@ -713,15 +789,12 @@ function onSolved(d) {
     board.appendChild(row);
   });
   clearInterval(timer);
+  S.phase = 'solved';
+  renderControls();
   live('won', true);
 }
 $('wonClose').onclick = () => live('won', false);
-
-function onTidied(d) {
-  if (d.reverted) { toast('Tidy undone'); return; }
-  const who = S.players.get(d.by);
-  toast(`${who ? esc(who.name) : 'Someone'} tidied the pile`, d.by === S.me.id ? null : null, true);
-}
+$('wonNext').onclick = () => { live('won', false); startNext(); };
 function onCellPing(d) {
   pings.push({ idx: d.idx, t: performance.now(), c: colorOf(d.by) });
   const el = S.cells[d.idx];
@@ -731,11 +804,16 @@ function onCellPing(d) {
 }
 function onChat(d) {
   const p = S.players.get(d.by);
-  const row = document.createElement('div');
-  row.innerHTML = `<span class="font-medium" style="color:${p ? p.color : '#767268'}">${esc(p ? p.name : '?')}</span>
-    <span class="text-ink/80"> ${esc(d.text)}</span>`;
-  $('chatlog').appendChild(row);
-  $('chatlog').scrollTop = 1e9;
+  const html = `<span class="font-medium" style="color:${p ? p.color : '#767268'}">${esc(p ? p.name : '?')}</span>` +
+    `<span class="text-ink/80"> ${esc(d.text)}</span>`;
+  // Mirror into both the in-game panel and the choosing-screen chat.
+  for (const id of ['chatlog', 'landLog']) {
+    const log = $(id); if (!log) continue;
+    const row = document.createElement('div');
+    row.innerHTML = html;
+    log.appendChild(row);
+    log.scrollTop = 1e9;
+  }
   if (!$('chat').classList.contains('on')) $('chatDot').classList.remove('hidden');
 }
 
@@ -772,19 +850,12 @@ function clock(startedAt) {
   };
   upd(); timer = setInterval(upd, 500);
 }
-function toast(msg, _c, undoable) {
+function toast(msg) {
   const el = document.createElement('div');
   el.className = 'toast float rounded-full h-9 px-4 flex items-center gap-3 text-[12px] pointer-events-auto';
   el.innerHTML = `<span>${msg}</span>`;
-  if (undoable) {
-    const b = document.createElement('button');
-    b.className = 'text-[11.5px] font-medium text-lock';
-    b.textContent = 'Undo';
-    b.onclick = () => { sendBin([OP.UNTIDY]); el.remove(); };
-    el.appendChild(b);
-  }
   $('toasts').appendChild(el);
-  setTimeout(() => el.remove(), undoable ? 3000 : 2200);
+  setTimeout(() => el.remove(), 2200);
 }
 
 /* ══ sound ═══════════════════════════════════════════════════════════════ */
@@ -1015,10 +1086,6 @@ cv.addEventListener('pointerdown', e => {
   if (ptrs.size === 2) { release(); pan = null; beginPinch(); return; }
   if (ptrs.size > 2) return;
 
-  const now = performance.now();
-  if (now - lastTap < 300) { lastTap = 0; zoomAt(s.x, s.y, cam.k * 1.9); return; }
-  lastTap = now;
-
   if (spaceDown || e.button === 1) { beginPan(s); cv.classList.add('grabbing'); return; }
 
   const w = toWorld(s.x, s.y);
@@ -1160,7 +1227,8 @@ $('recutNo').onclick = () => live('recut', false);
 
 $('peek').onclick = e => { peek = !peek; e.currentTarget.setAttribute('aria-pressed', peek); dirty = true; };
 $('edges').onclick = e => { edgesOnly = !edgesOnly; e.currentTarget.setAttribute('aria-pressed', edgesOnly); dirty = true; };
-$('tidy').onclick = () => sendBin([OP.TIDY]);
+// Tidy was removed: people spammed it and re-dealing 1000 pieces caused lag.
+const _tidyBtn = $('tidy'); if (_tidyBtn) _tidyBtn.remove();
 // The room's app modal owns closing; hide the standalone "new room" button.
 $('leave').style.display = 'none';
 $('codeChip').style.display = 'none';
@@ -1169,26 +1237,63 @@ $('codeChip').style.display = 'none';
 // Everyone else can still solve. buildLayout re-runs applyManage after a recut.
 function applyManage() {
   const cuts = $('cuts');
-  if (cuts) cuts.style.display = S.canManage ? '' : 'none';
-  let end = $('endPuzzle');
-  if (S.canManage) {
-    if (!end) {
-      end = document.createElement('button');
-      end.id = 'endPuzzle';
-      end.className = 'ico';
-      end.title = 'End this puzzle for everyone';
-      end.innerHTML = '<i class="fa-solid fa-flag-checkered"></i>';
-      end.onclick = () => {
-        if (confirm('End this puzzle for everyone? A new one can then be started.'))
-          post({ t: 'puzzle-end' });
-      };
-      const barEl = $('snd') && $('snd').parentElement;
-      if (barEl) barEl.appendChild(end);
-    }
-    end.style.display = '';
-  } else if (end) {
-    end.style.display = 'none';
+  if (cuts) cuts.style.display = (S.canManage && S.phase !== 'choosing') ? '' : 'none';
+  renderControls();
+}
+
+// One labelled control in the top bar. The starter/staff get a plain "End
+// puzzle"; everyone else gets "Vote to end (n/m)" (a majority ends it). A solved
+// board shows "Start next" for everyone so nobody can sit on a finished puzzle.
+function renderControls() {
+  const bar = $('snd') && $('snd').parentElement;
+  if (!bar) return;
+  let btn = $('endBtn');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.id = 'endBtn';
+    btn.className = 'seg num';
+    btn.style.marginLeft = '4px';
+    bar.appendChild(btn);
   }
+  const ph = S.phase;
+  if (ph === 'playing' && S.canManage) {
+    btn.style.display = '';
+    btn.textContent = 'End puzzle';
+    btn.title = 'End this puzzle for everyone';
+    btn.setAttribute('aria-pressed', 'false');
+    btn.onclick = () => { if (confirm('End this puzzle for everyone?')) post({ t: 'puzzle-end' }); };
+  } else if (ph === 'playing') {
+    const v = S.votes || { count: 0, need: 0, voters: [] };
+    const mine = !!(v.voters && S.me && v.voters.includes(S.me.id));
+    btn.style.display = '';
+    btn.textContent = `Vote to end ${v.count}/${v.need || '?'}`;
+    btn.title = 'Vote to end this puzzle - a majority ends it';
+    btn.setAttribute('aria-pressed', mine ? 'true' : 'false');
+    btn.onclick = () => sendBin([OP.VOTEEND]);
+  } else if (ph === 'solved') {
+    btn.style.display = '';
+    btn.textContent = 'Start next';
+    btn.title = 'Start the next puzzle';
+    btn.setAttribute('aria-pressed', 'false');
+    btn.onclick = startNext;
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+// Bring up the shared choosing screen so anyone can pick the next picture.
+function startNext() {
+  show('won', false);
+  live('land', true);
+}
+
+function setOwnerLabel(owner) {
+  const el = $('spec');
+  if (!el) return;
+  const base = S.room ? `${S.room.cols}×${S.room.rows} · ${S.room.count} pieces` : '';
+  el.textContent = owner && owner.name
+    ? (base ? base + ' · by ' + owner.name : 'by ' + owner.name)
+    : base;
 }
 
 /* ══ chat ════════════════════════════════════════════════════════════════ */
@@ -1198,14 +1303,20 @@ $('chatBtn').onclick = () => {
   $('chatBtn').setAttribute('aria-pressed', on);
   if (on) { $('chatDot').classList.add('hidden'); $('chatIn').focus(); }
 };
-const say = () => {
-  const t = $('chatIn').value.trim();
+function sayFrom(inputId) {
+  const el = $(inputId);
+  if (!el) return;
+  const t = el.value.trim();
   if (!t) return;
   sendJSON(OP.CHAT, { text: t });
-  $('chatIn').value = '';
-};
+  el.value = '';
+}
+const say = () => sayFrom('chatIn');
 $('chatSend').onclick = say;
 $('chatIn').addEventListener('keydown', e => { if (e.key === 'Enter') say(); });
+// Choosing-screen chat (usable before any picture is picked).
+$('landChatSend') && ($('landChatSend').onclick = () => sayFrom('landChatIn'));
+$('landChatIn') && $('landChatIn').addEventListener('keydown', e => { if (e.key === 'Enter') sayFrom('landChatIn'); });
 
 /* ══ share sheet + QR ════════════════════════════════════════════════════ */
 $('codeChip').onclick = async () => {
@@ -1277,21 +1388,41 @@ async function shrink(file) {
 /* ── NSFW: scan in the browser before upload. The server also requires a
    passing attestation, so an image cannot be uploaded without a clean scan. ── */
 let nsfwModel = null;
-async function nsfwScan(blob) {
+// Draw the image into a 224px square for the classifier. `crop` takes a centre
+// square first so a small explicit region is not washed out by the whole frame.
+function nsfwCanvas(bmp, crop) {
+  const c = document.createElement('canvas'); c.width = 224; c.height = 224;
+  const g = c.getContext('2d');
+  if (crop) {
+    const s = Math.min(bmp.width, bmp.height);
+    g.drawImage(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s, 0, 0, 224, 224);
+  } else {
+    g.drawImage(bmp, 0, 0, 224, 224);
+  }
+  return c;
+}
+async function nsfwScan(file) {
   try {
     if (!window.nsfwjs || !window.tf) return { safe: false, reason: 'scanner-missing' };
-    // Load the model from Talkomatic itself, not the nsfwjs default CDN (which
-    // may be blocked or unreachable). mobilenet_v2 uses a 224px input.
+    // Model is self-hosted (the nsfwjs default CDN can be unreachable).
     if (!nsfwModel) nsfwModel = await nsfwjs.load('/models/nsfw/', { size: 224 });
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
-    const preds = await nsfwModel.classify(img);
-    URL.revokeObjectURL(url);
-    const scores = {};
-    for (const p of preds) scores[p.className] = p.probability;
-    const bad = (scores.Porn || 0) > 0.4 || (scores.Hentai || 0) > 0.4 || (scores.Sexy || 0) > 0.75;
-    return { safe: !bad, scores };
+    const bmp = await createImageBitmap(file);
+    // Scan the whole image and a centre crop; keep the worst score per class.
+    const worst = { Porn: 0, Hentai: 0, Sexy: 0, Neutral: 1 };
+    for (const crop of [false, true]) {
+      const preds = await nsfwModel.classify(nsfwCanvas(bmp, crop));
+      const s = {};
+      for (const p of preds) s[p.className] = p.probability;
+      worst.Porn = Math.max(worst.Porn, s.Porn || 0);
+      worst.Hentai = Math.max(worst.Hentai, s.Hentai || 0);
+      worst.Sexy = Math.max(worst.Sexy, s.Sexy || 0);
+      worst.Neutral = Math.min(worst.Neutral, s.Neutral || 0);
+    }
+    bmp.close && bmp.close();
+    // Strict, and kept in sync with the server recheck in server.js.
+    const bad = worst.Porn > 0.3 || worst.Hentai > 0.3 || worst.Sexy > 0.5 ||
+      worst.Porn + worst.Hentai + worst.Sexy > 0.6;
+    return { safe: !bad, scores: worst };
   } catch (e) {
     return { safe: false, reason: String((e && e.message) || e) };
   }
@@ -1303,8 +1434,8 @@ $('create').onclick = async () => {
   $('upErr').classList.add('hidden');
   $('create').innerHTML = '<i class="fa-solid fa-circle-notch fa-spin text-[11px]"></i>Checking image';
   try {
-    const { blob, w, h } = await shrink(picked);
-    const scan = await nsfwScan(blob);
+    // Scan the original picture (better recall than the downscaled upload copy).
+    const scan = await nsfwScan(picked);
     if (!scan.safe)
       throw new Error(
         scan.reason
@@ -1312,6 +1443,7 @@ $('create').onclick = async () => {
           : 'That image did not pass the safety check.',
       );
     $('create').innerHTML = '<i class="fa-solid fa-circle-notch fa-spin text-[11px]"></i>Uploading';
+    const { blob, w, h } = await shrink(picked);
     const res = await fetch(`/api/v1/puzzle/${ROOM_ID}/image?w=${w}&h=${h}&n=${target}`, {
       method: 'POST',
       headers: { 'content-type': 'image/jpeg', 'x-nsfw-scan': JSON.stringify(scan) },
@@ -1321,6 +1453,7 @@ $('create').onclick = async () => {
     if (!res.ok) {
       let msg = 'Upload failed';
       try { const j = await res.json(); msg = (j.error && j.error.message) || msg; } catch {}
+      openPuzzle(); // someone may have started first - join whatever exists now
       throw new Error(msg);
     }
     openPuzzle(); // the server built the board; ask the parent to join us in

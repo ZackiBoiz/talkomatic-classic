@@ -79,7 +79,7 @@
       (typeof currentUsername !== "undefined" && currentUsername) || "",
     );
     frame.src =
-      "puzzle.html?v=1.0.1&roomId=" +
+      "puzzle.html?v=1.0.2&roomId=" +
       encodeURIComponent(currentRoomId) +
       "&name=" +
       name;
