@@ -38,6 +38,7 @@ const invites = require("./invites");
 const reports = require("./reports");
 const appeals = require("./appeals");
 const suggestions = require("./suggestions");
+const puzzle = require("./puzzle");
 const banhistory = require("./banhistory");
 const blocklist = require("./blocklist");
 const ipban = require("./ipban");
@@ -164,6 +165,7 @@ function getBoardState(roomId) {
 
 function cleanupBoardState(roomId) {
   boardState.delete(roomId);
+  puzzle.destroyForRoom(roomId);
 }
 
 function finalizeBoardUserStroke(roomId, userId) {
@@ -2546,6 +2548,44 @@ function registerSocketHandlers() {
           { userId: socket.handshake.session.userId, open: true },
           false,
         );
+      }),
+    );
+
+    // ── Collaborative puzzle: one shared board per room ─────────────────
+    socket.on(
+      "puzzle open",
+      safe(async () => {
+        const userId = socket.handshake.session?.userId;
+        if (!socket.roomId || !userId) return;
+        if (socket.spectating) return; // spectators don't drive the puzzle
+        clearAFKTimers(userId);
+        const isStaff = !!(socket.isDev || socket.isMod);
+        puzzle.open(socket, socket.roomId, userId, socket.handshake.session?.username, isStaff);
+      }),
+    );
+    socket.on(
+      "puzzle close",
+      safe(async () => {
+        const userId = socket.handshake.session?.userId;
+        if (userId) puzzle.close(socket, userId);
+      }),
+    );
+    socket.on(
+      "puzzle msg",
+      safe(async (buf) => {
+        const userId = socket.handshake.session?.userId;
+        if (!socket.roomId || !userId || socket.spectating) return;
+        const isStaff = !!(socket.isDev || socket.isMod);
+        puzzle.message(socket, userId, socket.handshake.session?.username, buf, isStaff);
+      }),
+    );
+    socket.on(
+      "puzzle end",
+      safe(async () => {
+        const userId = socket.handshake.session?.userId;
+        if (!socket.roomId || !userId || socket.spectating) return;
+        const isStaff = !!(socket.isDev || socket.isMod);
+        puzzle.endForRoom(socket.roomId, userId, isStaff);
       }),
     );
 
@@ -6276,6 +6316,7 @@ function registerSocketHandlers() {
           setTimeout(() => broadcastReportsList(), 150);
         if (userId) {
           clearAFKTimers(userId);
+          puzzle.close(socket, userId);
           await leaveRoom(socket, userId);
           state.userMessageBuffers.delete(userId);
           state.devUsers.delete(userId);

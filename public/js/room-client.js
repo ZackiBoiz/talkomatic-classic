@@ -1515,6 +1515,16 @@ const APPS_DATA = {
     openInNewTab: false,
     action: "piano",
   },
+  puzzle: {
+    name: "Puzzle",
+    description: "Solve a jigsaw together from any picture",
+    icon: "🧩",
+    iconClass: "placeholder",
+    status: "available",
+    url: null,
+    openInNewTab: false,
+    action: "puzzle",
+  },
   minigames: {
     name: "Mini Games",
     description: "Uno, Hangman, Tic Tac Toe & more",
@@ -1586,6 +1596,8 @@ function createAppDirectoryDropdown() {
           openTalkoboard();
         } else if (app.action === "piano") {
           openPiano();
+        } else if (app.action === "puzzle") {
+          if (window.TalkomaticPuzzle) window.TalkomaticPuzzle.open();
         } else if (app.openInNewTab) {
           window.open(app.url, "_blank", "noopener,noreferrer");
         } else {
