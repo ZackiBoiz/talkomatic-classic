@@ -1514,6 +1514,16 @@ const APPS_DATA = {
     openInNewTab: false,
     action: "piano",
   },
+  puzzle: {
+    name: "Puzzle",
+    description: "Solve a jigsaw together from any picture",
+    icon: "🧩",
+    iconClass: "placeholder",
+    status: "available",
+    url: null,
+    openInNewTab: false,
+    action: "puzzle",
+  },
   minigames: {
     name: "Mini Games",
     description: "Uno, Hangman, Tic Tac Toe & more",
@@ -1534,6 +1544,7 @@ const APPS_DATA = {
   },
 };
 let appDirectoryDropdown = null;
+let puzzleAppEnabled = true; // flipped by the "puzzle state" event from a dev toggle
 
 function createAppDirectoryDropdown() {
   if (appDirectoryDropdown) appDirectoryDropdown.remove();
@@ -1546,6 +1557,7 @@ function createAppDirectoryDropdown() {
   const grid = document.createElement("div");
   grid.className = "app-grid";
   Object.entries(APPS_DATA).forEach(([id, app]) => {
+    if (id === "puzzle" && !puzzleAppEnabled) return; // dev turned the puzzle off
     const item = document.createElement("div");
     item.className = `app-item ${app.status === "coming-soon" ? "disabled" : ""}`;
     const icon = document.createElement("div");
@@ -1585,6 +1597,8 @@ function createAppDirectoryDropdown() {
           openTalkoboard();
         } else if (app.action === "piano") {
           openPiano();
+        } else if (app.action === "puzzle") {
+          if (window.TalkomaticPuzzle) window.TalkomaticPuzzle.open();
         } else if (app.openInNewTab) {
           window.open(app.url, "_blank", "noopener,noreferrer");
         } else {
@@ -2422,6 +2436,17 @@ function renderDevContext() {
     }
   });
 }
+
+// A dev toggled the puzzle app on/off in the dashboard. Hide/show the tile and
+// close the puzzle if it just went away under a non-staff user.
+socket.on("puzzle state", (d) => {
+  puzzleAppEnabled = !d || d.enabled !== false;
+  if (!puzzleAppEnabled && window.TalkomaticPuzzle) window.TalkomaticPuzzle.close();
+  if (appDirectoryDropdown) {
+    appDirectoryDropdown.remove();
+    appDirectoryDropdown = null; // rebuilt from APPS_DATA on next open
+  }
+});
 
 socket.on("dev context", (ctx) => {
   devContext.clear();

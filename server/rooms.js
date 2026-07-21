@@ -38,6 +38,7 @@ const invites = require("./invites");
 const reports = require("./reports");
 const appeals = require("./appeals");
 const suggestions = require("./suggestions");
+const puzzle = require("./puzzle");
 const banhistory = require("./banhistory");
 const blocklist = require("./blocklist");
 const ipban = require("./ipban");
@@ -164,6 +165,7 @@ function getBoardState(roomId) {
 
 function cleanupBoardState(roomId) {
   boardState.delete(roomId);
+  puzzle.destroyForRoom(roomId);
 }
 
 function finalizeBoardUserStroke(roomId, userId) {
@@ -909,6 +911,14 @@ function broadcastApplicationsState() {
   for (const [, s] of io().sockets.sockets)
     if (s.isDev || (s.isMod && (s.modLevel || 2) >= 2))
       s.emit("applications state", { open: !!state.applicationsOpen });
+}
+
+// Push the puzzle on/off switch to every connected client so the app tile
+// hides or reappears live when a dev toggles it.
+function broadcastPuzzleState() {
+  if (!io()) return;
+  for (const [, s] of io().sockets.sockets)
+    s.emit("puzzle state", { enabled: !!state.puzzleEnabled });
 }
 
 // Push the reports board to every open dashboard (full mods + devs) so new
@@ -2204,6 +2214,10 @@ function registerSocketHandlers() {
     const clientIp = socket.clientIp || socket.handshake.address;
     socket.deviceType = deviceTypeFromUA(socket.handshake.headers["user-agent"]);
 
+    // Tell this browser whether the puzzle app is on, so the room can hide the
+    // tile when a dev has turned it off.
+    socket.emit("puzzle state", { enabled: !!state.puzzleEnabled });
+
     // Durable per-browser device id: record presence for "active vs new" and
     // invite credit. Not a secret; never gates a privileged action. Bots and
     // the Mod Log board carry none, so this is a no-op for them.
@@ -2546,6 +2560,45 @@ function registerSocketHandlers() {
           { userId: socket.handshake.session.userId, open: true },
           false,
         );
+      }),
+    );
+
+    // ── Collaborative puzzle: one shared board per room ─────────────────
+    socket.on(
+      "puzzle open",
+      safe(async () => {
+        const userId = socket.handshake.session?.userId;
+        if (!socket.roomId || !userId) return;
+        if (socket.spectating) return; // spectators don't drive the puzzle
+        const isStaff = !!(socket.isDev || socket.isMod);
+        if (!state.puzzleEnabled && !isStaff) return; // dev turned the puzzle off
+        clearAFKTimers(userId);
+        puzzle.open(socket, socket.roomId, userId, socket.handshake.session?.username, isStaff);
+      }),
+    );
+    socket.on(
+      "puzzle close",
+      safe(async () => {
+        const userId = socket.handshake.session?.userId;
+        if (userId) puzzle.close(socket, userId);
+      }),
+    );
+    socket.on(
+      "puzzle msg",
+      safe(async (buf) => {
+        const userId = socket.handshake.session?.userId;
+        if (!socket.roomId || !userId || socket.spectating) return;
+        const isStaff = !!(socket.isDev || socket.isMod);
+        puzzle.message(socket, userId, socket.handshake.session?.username, buf, isStaff);
+      }),
+    );
+    socket.on(
+      "puzzle end",
+      safe(async () => {
+        const userId = socket.handshake.session?.userId;
+        if (!socket.roomId || !userId || socket.spectating) return;
+        const isStaff = !!(socket.isDev || socket.isMod);
+        puzzle.endForRoom(socket.roomId, userId, isStaff);
       }),
     );
 
@@ -4692,6 +4745,7 @@ function registerSocketHandlers() {
           baseMaxRooms: CONFIG.LIMITS.BASE_MAX_ROOMS,
           maxRoomCapacity: CONFIG.LIMITS.MAX_ROOM_CAPACITY,
           maintenance: state.maintenance,
+          puzzleEnabled: !!state.puzzleEnabled,
         });
       }),
     );
@@ -4773,6 +4827,14 @@ function registerSocketHandlers() {
           CONFIG.LIMITS.MAX_ROOM_CAPACITY = Math.floor(data.maxRoomCapacity);
           capacityChanged = true;
         }
+        let puzzleChanged = false;
+        if (
+          typeof data?.puzzleEnabled === "boolean" &&
+          data.puzzleEnabled !== !!state.puzzleEnabled
+        ) {
+          state.puzzleEnabled = data.puzzleEnabled;
+          puzzleChanged = true;
+        }
         state.apiCache.delete("config");
         state.apiCache.delete("public_rooms");
         const flags = {
@@ -4781,11 +4843,13 @@ function registerSocketHandlers() {
           baseMaxRooms: CONFIG.LIMITS.BASE_MAX_ROOMS,
           maxRoomCapacity: CONFIG.LIMITS.MAX_ROOM_CAPACITY,
           maintenance: state.maintenance,
+          puzzleEnabled: !!state.puzzleEnabled,
         };
         logStaff(socket, "set flags", JSON.stringify(flags), "-");
         // Capacity affects every room's isFull/display - refresh all views.
         updateLobby();
         if (capacityChanged) for (const [rid] of state.rooms) updateRoom(rid);
+        if (puzzleChanged) broadcastPuzzleState();
         socket.emit("dev flags", flags);
         socket.emit("staff action result", {
           action: "flags",
@@ -5717,7 +5781,6 @@ function registerSocketHandlers() {
         });
       }),
     );
-
     socket.on(
       "mod application review",
       safe(async (data) => {
@@ -6276,6 +6339,7 @@ function registerSocketHandlers() {
           setTimeout(() => broadcastReportsList(), 150);
         if (userId) {
           clearAFKTimers(userId);
+          puzzle.close(socket, userId);
           await leaveRoom(socket, userId);
           state.userMessageBuffers.delete(userId);
           state.devUsers.delete(userId);
