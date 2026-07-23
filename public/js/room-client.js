@@ -44,6 +44,7 @@ const CLIENT_PROTOCOL = 1;
 let pendingRestoreText = null;
 let talkoboardInstance = null;
 let pianoInstance = null;
+let pongInstance = null;
 
 // Dev mode state
 let currentUserIsDev = false;
@@ -1514,6 +1515,16 @@ const APPS_DATA = {
     openInNewTab: false,
     action: "piano",
   },
+  pong: {
+    name: "Multiplayer Pong",
+    description: "Play Pong together in real-time",
+    icon: "🏓",
+    iconClass: "placeholder",
+    status: "available",
+    url: null,
+    openInNewTab: false,
+    action: "pong",
+  },
   puzzle: {
     name: "Puzzle",
     description: "Solve a jigsaw together from any picture",
@@ -1597,6 +1608,8 @@ function createAppDirectoryDropdown() {
           openTalkoboard();
         } else if (app.action === "piano") {
           openPiano();
+        } else if (app.action === "pong") {
+          openPong();
         } else if (app.action === "puzzle") {
           if (window.TalkomaticPuzzle) window.TalkomaticPuzzle.open();
         } else if (app.openInNewTab) {
@@ -1702,6 +1715,30 @@ function openPiano() {
     console.error("Piano failed to open:", err);
     showErrorModal(
       "Sorry, the Piano failed to open. Please refresh the page and try again.",
+    );
+  }
+}
+
+function openPong() {
+  if (!currentRoomId || !currentUserId) {
+    showErrorModal("You must be in a room to play Pong.");
+    return;
+  }
+  if (typeof Pong === "undefined") {
+    showErrorModal(
+      "Pong is still loading. Please refresh the page and try again.",
+    );
+    return;
+  }
+  try {
+    if (!pongInstance) {
+      pongInstance = new Pong(socket, currentUserId, currentUsername);
+    }
+    pongInstance.open();
+  } catch (err) {
+    console.error("Pong failed to open:", err);
+    showErrorModal(
+      "Pong failed to open. Please refresh the page and try again.",
     );
   }
 }

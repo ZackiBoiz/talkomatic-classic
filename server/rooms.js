@@ -39,6 +39,7 @@ const reports = require("./reports");
 const appeals = require("./appeals");
 const suggestions = require("./suggestions");
 const puzzle = require("./puzzle");
+const pong = require("./pong");
 const banhistory = require("./banhistory");
 const blocklist = require("./blocklist");
 const ipban = require("./ipban");
@@ -1867,6 +1868,7 @@ async function leaveRoom(socket, userId) {
 
     finalizeBoardUserStroke(roomId, userId);
     pianoDropPresence(roomId, userId, true);
+    pong.leave(roomId, userId);
 
     const room = state.rooms.get(roomId);
     if (room) {
@@ -2213,6 +2215,7 @@ function registerSocketHandlers() {
   io().on("connection", (socket) => {
     const clientIp = socket.clientIp || socket.handshake.address;
     socket.deviceType = deviceTypeFromUA(socket.handshake.headers["user-agent"]);
+    pong.registerSocket(socket, io);
 
     // Tell this browser whether the puzzle app is on, so the room can hide the
     // tile when a dev has turned it off.
@@ -6491,6 +6494,9 @@ function startCleanupIntervals() {
     for (const roomId of pianoState.keys()) {
       if (!state.rooms.has(roomId)) pianoState.delete(roomId);
     }
+    for (const roomId of pong.games.keys()) {
+      if (!state.rooms.has(roomId)) pong.destroyRoom(roomId);
+    }
   }, 180000);
 
   // Empty room cleanup (10 min)
@@ -6510,6 +6516,7 @@ function startCleanupIntervals() {
       state.roomLastChatActivity.delete(id);
       cleanupBoardState(id);
       cleanupPianoState(id);
+      pong.destroyRoom(id);
       if (state.roomDeletionTimers.has(id)) {
         clearTimeout(state.roomDeletionTimers.get(id));
         state.roomDeletionTimers.delete(id);
@@ -6542,6 +6549,7 @@ function startCleanupIntervals() {
           state.devUsers.delete(u.id);
           finalizeBoardUserStroke(roomId, u.id);
           pianoDropPresence(roomId, u.id, true);
+          pong.leave(roomId, u.id);
           if (state.typingTimeouts.has(u.id)) {
             clearTimeout(state.typingTimeouts.get(u.id));
             state.typingTimeouts.delete(u.id);
